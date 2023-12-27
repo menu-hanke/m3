@@ -1,0 +1,5 @@
+libm3.o: libm3.c def.h mem.c target.h mp.c mp.h state.c m3.h
+m3.o: m3.c m3.h target.h
+mem.o: mem.c def.h target.h
+mp.o: mp.c target.h def.h mp.h
+state.o: state.c def.h m3.h mp.h target.h

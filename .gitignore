@@ -1,0 +1,9 @@
+*.o
+*.so
+*.a
+*.lua.c
+/m3
+/m3_cdef.lua
+.gdb_history
+.ccls
+.ccls-cache

@@ -24,9 +24,6 @@ if host.on_data then host.on_data() end
 
 require("m3_pipe").startup()
 
--- must go before fhk
-require("m3_data").startup()
-
 require("m3_fhk").startup()
 
 -- two reasons to flush() here:

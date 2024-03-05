@@ -1,5 +1,7 @@
 local array = require "m3_array"
+local data = require "m3_data"
 local mem = require "m3_mem"
+local prototype = require "m3_prototype"
 local buffer = require "string.buffer"
 local ffi = require "ffi"
 
@@ -61,6 +63,106 @@ local function readfile(src)
 	define(def)
 end
 
+local ctype2fhk = {}
+for c,f in pairs {
+	uint8_t = "u8",   int8_t = "i8",
+	uint16_t = "u16", int16_t = "i16",
+	uint32_t = "u32", int32_t = "i32",
+	uint64_t = "u64", int64_t = "i64",
+	float    = "f32", double  = "f64"
+} do ctype2fhk[tonumber(ffi.typeof(c))] = f end
+
+local function ptrarith(p)
+	return p+0
+end
+
+local function toref(p)
+	if pcall(ptrarith, p) then
+		-- it's a pointer
+		return p[0]
+	else
+		-- it's a reference
+		return p
+	end
+end
+
+-- TODO: allow also proto + instance is udata
+-- TODO: when parametrized commands are implemented use them instead here
+-- TODO: use const instead of model when it's implemented properly
+local function map_struct(buf, group, struct)
+	local proto = prototype.get(struct)
+	if not proto then
+		-- TODO: reflect
+		error("TODO")
+	end
+	local base = ffi.cast("uintptr_t", ffi.cast("void *", struct))
+	struct = toref(struct)
+	for f, p in pairs(proto) do
+		local ftype = ctype2fhk[tonumber(p.ctype)]
+		-- TODO: map nested structs etc. needs reflect.
+		if ftype then
+			buf:putf("model(`%s`) `%s` -> lds.%s(0x%x)\n", group, f, ftype,
+				base + ffi.offsetof(struct, f))
+		end
+	end
+end
+
+-- TODO: same as above
+local function map_dataframe(buf, group, df)
+	error("TODO")
+end
+
+local function map_vars(buf, group, what, obj)
+	if what == "struct" then
+		map_struct(buf, group, obj)
+	elseif what == "dataframe" then
+		map_dataframe(buf, group, obj)
+	else
+		error("TODO")
+	end
+end
+
+local function map_space(buf, group, what, obj)
+	buf:putf("model(global) `%s` -> ", group)
+	if what == "struct" then
+		buf:put("1")
+	else
+		error("TODO")
+	end
+	buf:put("\n")
+end
+
+local function map_group(buf, group, data)
+	local needspace = group ~= "global"
+	for o in pairs(data) do
+		local ok, what = pcall(function() return o["m3$type"] end)
+		if ok and what then
+			if needspace then
+				-- TODO: if there's multiple objects make sure the space maps agree.
+				-- probably the cleanest way to do this is to define one var per object,
+				-- then one var which asserts that they are all equal (add an fhk intrinsic for this)
+				map_space(buf, group, what, o)
+				needspace = false
+			end
+			map_vars(buf, group, what, o)
+		else
+			-- TODO: this is possible to implement but requires stack swapping
+			-- (it doesn't necessarily require changes to fhk but it's better to implement
+			--  on the fhk side since the lua driver already has a stack swapping
+			--  implementation anyway)
+			error("TODO non-cdata")
+		end
+	end
+end
+
+local function map(data)
+	local buf = buffer.new()
+	for group, vars in pairs(data) do
+		map_group(buf, group, vars)
+	end
+	define(buf)
+end
+
 local function uncompiled()
 	error("attmpt to execute query on uncompiled graph")
 end
@@ -87,7 +189,7 @@ local function makequery(P, state, newstate, query)
 	src:put([[
 		local ffi = require "ffi"
 		local C, cast = ffi.C, ffi.cast
-		local u8p, u32p, voidp = ffi.typeof("uint8_t *"), ffi.typeof("uint32_t *"), ffi.typeof("void *")
+		local u8p, u32p, voidpp = ffi.typeof("uint8_t *"), ffi.typeof("uint32_t *"), ffi.typeof("void **")
 		local state, newstate
 	]])
 	local args = {state, newstate}
@@ -121,7 +223,7 @@ local function makequery(P, state, newstate, query)
 	for i,f in ipairs(fields) do
 		if f.ofs_len ~= 0 then
 			src:putf([[
-				v%d.data = cast(voidp, p+%d)
+				v%d.data = cast(voidpp, p+%d)[0]
 				v%d.num = cast(u32p, p+%d)[0]
 			]], i, f.ofs, i, f.ofs_len)
 		end
@@ -141,6 +243,7 @@ end
 
 local function startup()
 	if not ctx then return end
+	map(data.data)
 	local state = mem.new("fhk_State *", "vstack")
 	state[0] = nil
 	local P = ffi.gc(C.fhk_compile(ctx.G), C.fhk_destroy)
@@ -152,7 +255,6 @@ local function startup()
 end
 
 return {
-	define   = define,
 	readfile = readfile,
 	query    = query,
 	startup  = startup

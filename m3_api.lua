@@ -5,6 +5,7 @@ local m3           = setmetatable({}, { __index = modapi })
 
 local control      = require "m3_control"
 local data         = require "m3_data"
+local fhk          = require "m3_fhk"
 local mem          = require "m3_mem"
 local pipe         = require "m3_pipe"
 local tree         = require "m3_tree"
@@ -32,6 +33,11 @@ m3.control = {
 	loop           = control.loop,
 	dynamic        = control.dynamic,
 	exec           = control.exec,
+}
+
+m3.fhk = {
+	define         = fhk.define,
+	readfile       = fhk.readfile
 }
 
 m3.save            = mem.save

@@ -31,7 +31,7 @@ local function new(fields)
 	return proto
 end
 
-local function toproto(x)
+local function get(x)
 	if getmetatable(x) == proto_mt then
 		-- is it already a proto?
 		return x
@@ -41,10 +41,13 @@ local function toproto(x)
 	else
 		-- is it something that has a proto?
 		local ok, proto = pcall(function() return x["m3$proto"] end)
-		if ok and proto then return proto end
-		-- else: create new proto
-		return new(x)
+		if ok then return proto end
 	end
+end
+
+local function toproto(x)
+	local proto = get(x)
+	if proto then return proto else return new(x) end
 end
 
 local function setpatchptr(ptr, proto)
@@ -58,6 +61,7 @@ end
 
 return {
 	new         = new,
+	get         = get,
 	toproto     = toproto,
 	setpatchptr = setpatchptr,
 	startup     = startup

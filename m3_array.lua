@@ -386,6 +386,7 @@ local function copycolfunc(ctype)
 end
 
 local function df_setcolsfunc(cols)
+	if #cols == 0 then return function() end end
 	local buf = buffer.new()
 	buf:put("local zeros ")
 	local copyct, copyf = {}, {}

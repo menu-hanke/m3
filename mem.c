@@ -134,18 +134,6 @@ static void mem_fastzero(void *ptr, void *end)
 
 /* ---- Memory (re-)allocation ---------------------------------------------- */
 
-//LUAFUNC
-//void *m3__mem_alloc(m3_RegionHeader *reg, size_t size, size_t align)           LUADEF(.)
-//{
-//	intptr_t p = reg->cursor;
-//	p -= size;
-//	p &= -align;
-//	if (UNLIKELY(p < reg->base))
-//		return NULL;
-//	reg->cursor = p;
-//	return (void *) p;
-//}
-
 CDEFFUNC void *m3__mem_realloc(m3_RegionState *reg, uintptr_t base, void *src,
 	size_t oldsize, size_t newsize, size_t align)
 {
@@ -215,6 +203,21 @@ CDEFFUNC void *m3__mem_skiplist_realloc(m3_MemState *mem, void *src,
 		if(!start) break;
 		d -= size;
 	}
+	return (void *) p;
+}
+
+/* ---- External allocator -------------------------------------------------- */
+
+CDEFFUNC void* m3__mem_extalloc(m3_RegionState *reg, size_t size, size_t align)
+{
+	intptr_t p = reg->cursor;
+	p -= size;
+	p &= -align;
+	// TODO: check if p is still in the region here.
+	// (can include base in the userdata struct etc.
+	//  or use guard pages.
+	//  or compute it from the address.)
+	reg->cursor = p;
 	return (void *) p;
 }
 

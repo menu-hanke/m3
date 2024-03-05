@@ -24,6 +24,11 @@ if host.on_data then host.on_data() end
 
 require("m3_pipe").startup()
 
+-- must go before fhk
+require("m3_data").startup()
+
+require("m3_fhk").startup()
+
 -- two reasons to flush() here:
 --   (1) startup does some naughty things with pointers (see m3_patchptr.lua), so this makes sure
 --       there's no traces referencing the patched pointers.

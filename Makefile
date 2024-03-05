@@ -5,6 +5,7 @@
 # programs
 CC             = $(CROSS)gcc
 AR             = $(CROSS)gcc-ar
+STRIP          = $(CROSS)strip
 LUAJIT         = $(LJLUAPATH) $(LJBINARY)
 
 # embed lua bytecode? [y]/n
@@ -43,6 +44,13 @@ endif
 # note: this works only when TARGET=HOST.
 TARGET_JITARCH = $(shell $(LUAJIT) -e print\(jit.arch\))
 
+# ---- fhk ---------------------------------------------------------------------
+
+FHKPATH        = fhk5
+FHKA           = fhk5/target/release/libfhk.a
+FHKSO          = fhk5/target/release/libfhk.so
+M3EXE_FHK      = -Wl,--whole-archive $(FHKA) -Wl,--no-whole-archive
+
 # ---- LuaJIT ------------------------------------------------------------------
 
 LJSRC          = LuaJIT/src
@@ -69,11 +77,16 @@ else
 XCFLAGS        = -Wall -Wextra -O0 -g3 -DM3_DEBUG
 endif
 
+ifeq (y,$(DEBUG))
+STRIP          = :
+endif
+
 ifneq (Windows,$(TARGET))
-M3EXE_SYMS     = -rdynamic
+M3EXE_SYMS     = -Wl,--dynamic-list=dynamic.list
 endif
 
 CCOPTIONS      = $(XCFLAGS) $(LJINCLUDE) $(CFLAGS)
+LDOPTIONS      = -Wl,--gc-sections $(LDFLAGS)
 
 # ---- Objects -----------------------------------------------------------------
 
@@ -84,11 +97,11 @@ M3GENLUA       = m3_cdef.lua
 
 ifeq (y,$(LINKLUA))
 M3LUA_O        = m3.lua.o m3_api.lua.o m3_array.lua.o m3_cdef.lua.o m3_channel.lua.o \
-				 m3_control.lua.o m3_data.lua.o m3_debug.lua.o m3_effect.lua.o m3_hook.lua.o \
-				 m3_ipc.lua.o m3_loop.lua.o m3_mem.lua.o m3_mp.lua.o m3_mp_main.lua.o \
-				 m3_mp_worker.lua.o m3_patchptr.lua.o m3_pipe.lua.o m3_prototype.lua.o \
-				 m3_serial.lua.o m3_shm.lua.o m3_shutdown.lua.o m3_startup.lua.o m3_state.lua.o \
-				 m3_struct.lua.o m3_tree.lua.o
+				 m3_control.lua.o m3_data.lua.o m3_debug.lua.o m3_effect.lua.o m3_fhk.lua.o \
+				 m3_hook.lua.o m3_ipc.lua.o m3_loop.lua.o m3_mem.lua.o m3_mp.lua.o \
+				 m3_mp_main.lua.o m3_mp_worker.lua.o m3_patchptr.lua.o m3_pipe.lua.o \
+				 m3_prototype.lua.o m3_serial.lua.o m3_shm.lua.o m3_shutdown.lua.o \
+				 m3_startup.lua.o m3_state.lua.o m3_struct.lua.o m3_tree.lua.o
 M3EXELUA_O     = m3_input_ndjson.lua.o m3_simulate.lua.o m3_test.lua.o
 endif
 
@@ -103,10 +116,14 @@ endif
 # ---- Targets -----------------------------------------------------------------
 
 $(M3_EXE): $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O) $(M3GENLUA)
-	$(CC) $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O) $(M3EXE_LUAJIT) $(M3EXE_SYMS) -o $@
+	$(CC) $(LDOPTIONS) $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O) \
+		$(M3EXE_LUAJIT) $(M3EXE_FHK) $(M3EXE_SYMS) \
+		-o $@
+	$(STRIP) $@
 
 $(M3_SO): $(M3SO_O) $(M3LUA_O) $(M3GENLUA)
-	$(CC) $(M3SO_O) $(M3LUA_O) $(M3SO_LUAJIT) -shared -o $@
+	$(CC) $(LDOPTIONS) $(M3SO_O) $(M3LUA_O) $(M3SO_LUAJIT) -shared -o $@
+	$(STRIP) $@
 
 $(M3_A): $(M3A_O) $(M3LUA_O) $(M3GENLUA)
 	$(AR) rcs $@ $(M3A_O) $(M3LUA_O)

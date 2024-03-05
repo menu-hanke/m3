@@ -39,6 +39,9 @@ init.try           = m3.control.try
 init.loop          = m3.control.loop
 init.dynamic       = m3.control.dynamic
 
+init.graph         = m3.fhk.readfile
+init.defgraph      = m3.fhk.define
+
 -- TODO: this always causes a recompilation, maybe cache the instructions.
 function init.exec(insn)
 	m3.control.exec(m3.control.all { insn, forest.branch })

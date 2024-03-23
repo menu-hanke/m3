@@ -49,6 +49,12 @@ end
 
 local function define(src)
 	print("fhk_define", src)
+	if type(src) == "userdata" then
+		-- null terminate string buffer
+		-- TODO: fix this on the fhk side: just make the api take a pointer and a length.
+		--       it's converted to a rust string anyway.
+		src:put("\0")
+	end
 	if #src > 0 then
 		return C.fhk_define(getctx().G, src)
 	else
@@ -101,7 +107,7 @@ local function map_struct(buf, group, struct)
 		local ftype = ctype2fhk[tonumber(p.ctype)]
 		-- TODO: map nested structs etc. needs reflect.
 		if ftype then
-			buf:putf("model(`%s`) `%s` -> lds.%s(0x%x)\n", group, f, ftype,
+			buf:putf("const(`%s`) `%s` -> lds.%s(0x%x)\n", group, f, ftype,
 				base + ffi.offsetof(struct, f))
 		end
 	end
@@ -109,7 +115,21 @@ end
 
 -- TODO: same as above
 local function map_dataframe(buf, group, df)
-	error("TODO")
+	local proto = assert(prototype.get(df), "object is not a dataframe")
+	df = toref(df)
+	local base = ffi.cast("intptr_t", ffi.cast("void *", df))
+	for f,p in pairs(proto) do
+		local ftype = ctype2fhk[tonumber(p.ctype)]
+		if ftype then
+			buf:putf(
+				"const(global) `%s`#`%s` -> ldv.%s(0x%x, lds.i32(0x%x))\n",
+				group, f,
+				ftype,
+				base + ffi.offsetof(df, f),
+				base + ffi.offsetof(df, "num")
+			)
+		end
+	end
 end
 
 local function map_vars(buf, group, what, obj)
@@ -123,26 +143,32 @@ local function map_vars(buf, group, what, obj)
 end
 
 local function map_space(buf, group, what, obj)
-	buf:putf("model(global) `%s` -> ", group)
+	buf:putf("const(global) `%s` -> ", group)
 	if what == "struct" then
 		buf:put("1")
+	elseif what == "dataframe" then
+		obj = toref(obj)
+		buf:putf(
+			"{..lds.i32(0x%x)}",
+			ffi.cast("intptr_t", ffi.cast("void *", obj)) + ffi.offsetof(obj, "num")
+		)
 	else
-		error("TODO")
+		assert(false)
 	end
 	buf:put("\n")
 end
 
 local function map_group(buf, group, data)
-	local needspace = group ~= "global"
+	local space = group == "global"
 	for o in pairs(data) do
 		local ok, what = pcall(function() return o["m3$type"] end)
 		if ok and what then
-			if needspace then
+			if not space then
 				-- TODO: if there's multiple objects make sure the space maps agree.
 				-- probably the cleanest way to do this is to define one var per object,
 				-- then one var which asserts that they are all equal (add an fhk intrinsic for this)
 				map_space(buf, group, what, o)
-				needspace = false
+				space = what
 			end
 			map_vars(buf, group, what, o)
 		else
@@ -153,12 +179,34 @@ local function map_group(buf, group, data)
 			error("TODO non-cdata")
 		end
 	end
+	return space
 end
 
 local function map(data)
 	local buf = buffer.new()
+	local spaces = {}
 	for group, vars in pairs(data) do
-		map_group(buf, group, vars)
+		local space = map_group(buf, group, vars)
+		if group ~= "global" then
+			table.insert(spaces, {group=group, space=space})
+		end
+	end
+	-- TODO: relations between data structures should go in m3_data,
+	-- this can be used for reading/writing as well.
+	--
+	-- this just implements a simple special case: structs act similarly to globals,
+	-- ie. maps to struct groups are {0} and maps from struct groups are space
+	for i=1, #spaces do
+		for j=i+1, #spaces do
+			local a = spaces[i]
+			local b = spaces[j]
+			if a.space ~= "struct" then a,b = b,a end
+			if a.space == "struct" then
+				buf:putf("const(`%s`) ~{`%s`} -> global#`%s`\n", a.group, b.group, b.group)
+				buf:putf("const(`%s`) ~{`%s`} -> {0}\n", b.group, a.group)
+				buf:putf("map `%s`#~{`%s`} `%s`#~{`%s`}\n", a.group, b.group, b.group, a.group)
+			end
+		end
 	end
 	define(buf)
 end
@@ -255,6 +303,7 @@ local function startup()
 end
 
 return {
+	define   = define,
 	readfile = readfile,
 	query    = query,
 	startup  = startup

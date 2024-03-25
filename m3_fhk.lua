@@ -122,7 +122,7 @@ local function map_dataframe(buf, group, df)
 		local ftype = ctype2fhk[tonumber(p.ctype)]
 		if ftype then
 			buf:putf(
-				"const(global) `%s`#`%s` -> ldv.%s(0x%x, lds.i32(0x%x))\n",
+				"const(global) `%s`#`%s` -> ldv.%s(0x%x, lds.u32(0x%x))\n",
 				group, f,
 				ftype,
 				base + ffi.offsetof(df, f),
@@ -149,7 +149,7 @@ local function map_space(buf, group, what, obj)
 	elseif what == "dataframe" then
 		obj = toref(obj)
 		buf:putf(
-			"{..lds.i32(0x%x)}",
+			"{..lds.u32(0x%x)}",
 			ffi.cast("intptr_t", ffi.cast("void *", obj)) + ffi.offsetof(obj, "num")
 		)
 	else

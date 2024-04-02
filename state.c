@@ -128,6 +128,9 @@ static void checkopt(m3_Init *opt)
 	opt->vmsize = opt->vmsize ? (opt->vmsize & -M3_PAGE_SIZE) : VMSIZE_DEFAULT;
 }
 
+// from libfhk.a
+int luaopen_fhk(lua_State *L);
+
 lua_State *m3_newstate(m3_Init *opt)
 {
 	checkopt(opt);
@@ -145,6 +148,11 @@ lua_State *m3_newstate(m3_Init *opt)
 		lua_setfield(L, LUA_REGISTRYINDEX, "m3$fork");
 	}
 	luaL_openlibs(L);
+	lua_getfield(L, LUA_REGISTRYINDEX, "_LOADED");
+	lua_pushcfunction(L, luaopen_fhk);
+	lua_call(L, 0, 1);
+	lua_setfield(L, -2, "fhk");
+	lua_pop(L, 1);
 	int eh;
 	if (opt->err) {
 		lua_pushcfunction(L, opt->err);

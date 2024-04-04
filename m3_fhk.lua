@@ -20,6 +20,7 @@ local function getctx()
 end
 
 local function define(src)
+	print(">>>", src)
 	return getctx().G:define(src)
 end
 
@@ -163,9 +164,9 @@ local function map(data)
 			local b = spaces[j]
 			if a.space ~= "struct" then a,b = b,a end
 			if a.space == "struct" then
-				buf:putf("const(`%s`) ~{`%s`} -> global#`%s`\n", a.group, b.group, b.group)
-				buf:putf("const(`%s`) ~{`%s`} -> {0}\n", b.group, a.group)
-				buf:putf("map `%s`#~{`%s`} `%s`#~{`%s`}\n", a.group, b.group, b.group, a.group)
+				buf:putf("const(`%s`) @{`%s`} -> global#`%s`\n", a.group, b.group, b.group)
+				buf:putf("const(`%s`) @{`%s`} -> {0}\n", b.group, a.group)
+				buf:putf("map `%s`#@{`%s`} `%s`#@{`%s`}\n", a.group, b.group, b.group, a.group)
 			end
 		end
 	end
@@ -205,7 +206,9 @@ end
 local function startup()
 	if not ctx then return end
 	map(data.data)
-	local P = ctx.G:compile()
+	-- TODO: put this behind a verbosity option
+	local P, info = assert(ctx.G:compile("g"))
+	print(info.graph)
 	local state = mem.new(P.ctype_ptr, "vstack")
 	state[0] = nil
 	for id=0, math.huge do

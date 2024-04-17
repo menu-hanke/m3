@@ -40,6 +40,7 @@ init.loop          = m3.control.loop
 init.dynamic       = m3.control.dynamic
 
 init.graph         = m3.fhk.readfile
+init.graphfn       = m3.graphfn
 init.defgraph      = m3.fhk.define
 
 -- TODO: this always causes a recompilation, maybe cache the instructions.

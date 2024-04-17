@@ -337,6 +337,11 @@ local function df_write(df, col, realloc)
 	end
 end
 
+local function df_overwrite(df, col, src)
+	df_write(df, col)
+	copy(df[col], src, df["m3$size"][col]*df.num)
+end
+
 local function df_emptyfunc(cols)
 	local buf = buffer.new()
 	buf:put([[
@@ -544,6 +549,7 @@ local function df_newct(proto)
 			clear         = df_clear,
 			mutate        = df_mutate,
 			write         = df_write,
+			overwrite     = df_overwrite,
 			table         = df_table
 		},
 		__len             = df_len,

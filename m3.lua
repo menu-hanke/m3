@@ -21,6 +21,7 @@ m3.new          = mem.new
 m3.newarray     = mem.newarray
 m3.proto        = prototype.toproto
 m3.query        = fhk.query
+m3.graphfn      = fhk.graphfn
 m3.struct       = struct.new
 
 m3.pipe = {

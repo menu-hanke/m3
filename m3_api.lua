@@ -37,7 +37,7 @@ m3.control = {
 
 m3.fhk = {
 	define         = fhk.define,
-	readfile       = fhk.readfile
+	readfile       = fhk.readfile,
 }
 
 m3.save            = mem.save

@@ -1,7 +1,7 @@
 local m3 = require "m3_api"
 
 local host = {}
-local input = coroutine.wrap(function() coroutine.yield(true) end)
+local input = coroutine.wrap(function() coroutine.yield({}) end)
 local driver = {}
 local forest = m3.forest()
 
@@ -134,8 +134,10 @@ local function loadinput()
 		return loadinputmodule(parseurl(input))
 	elseif type(input) == "function" then
 		return {next=input}
-	else
+	elseif (input.next or input.read) then
 		return input
+	else
+		return loadinputmodule("data", input)
 	end
 end
 
@@ -147,13 +149,21 @@ local function loaddriver()
 	end
 end
 
-function host.on_data()
+local inputdef = m3.effect(function()
 	local input = loadinput()
+	if input.next and not input.read then
+		input.read = m3.write(m3.data())
+	end
+	return input
+end):once()
+
+function host.on_data()
+	local input = inputdef.value
 	local driver = loaddriver()
 	host.shutdown = input.close
 	if input.next then
 		local inputnext = input.next
-		local inputread = input.read or m3.read
+		local inputread = input.read
 		local inpipe = m3.pipe.shared_input()
 		host.work = function()
 			local v = inputnext()

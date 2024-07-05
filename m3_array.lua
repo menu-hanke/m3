@@ -1,15 +1,12 @@
 local de = require "m3_debug"
 local mem = require "m3_mem"
-local patchptr = require "m3_patchptr"
-local prototype = require "m3_prototype"
-local state = require "m3_state"
 local buffer = require "string.buffer"
 local ffi = require "ffi"
 require "table.new"
 
 local allocp, reallocp, iswritable = mem.allocp, mem.reallocp, mem.iswritable
 local memstate, zeros = mem.state, mem.zeros
-local type = type
+local tonumber, type = tonumber, type
 local C, alignof, cast, copy, sizeof, typeof = ffi.C, ffi.alignof, ffi.cast, ffi.copy, ffi.sizeof, ffi.typeof
 local u32p = typeof("uint32_t *")
 local band = bit.band
@@ -51,7 +48,7 @@ local function assertrealloc(self, p)
 	return p
 end
 
-function assertptr(p, msg)
+local function assertptr(p, msg)
 	-- `assert` will not work here since cdata NULL is truthy
 	if p == nil then
 		error(msg or "failed to allocate memory")
@@ -59,6 +56,71 @@ function assertptr(p, msg)
 	return p
 end
 
+---- slices --------------------------------------------------------------------
+
+local function slice_index(slice, index)
+	return slice.data[index]
+end
+
+local function slice_newindex(slice, index, value)
+	slice.data[index] = value
+end
+
+local function slice_len(slice)
+	return slice.num
+end
+
+local function slice_inext(slice, index)
+	index = index+1
+	if index < slice.num then
+		return index, slice.data[index]
+	end
+end
+
+local function slice_ipairs(slice)
+	return slice_inext, slice, -1
+end
+
+local function slice_tostring(slice)
+	local buf = buffer.new()
+	buf:put("[")
+	-- TODO: use cdata pretty print here
+	for i=0, slice.num-1 do
+		buf:put(" ", tostring(slice.data[i]))
+	end
+	buf:put(" ]")
+	return tostring(buf)
+end
+
+local slice_mt = {
+	__index    = slice_index,
+	__newindex = slice_newindex,
+	__len      = slice_len,
+	__ipairs   = slice_ipairs,
+	__tostring = slice_tostring
+}
+
+local function slice_newct(ctype)
+	return ffi.metatype(typeof([[
+		struct {
+			$ *data;
+			uint32_t num;
+		}
+	]], ctype), slice_mt)
+end
+
+local slicetab = {}
+
+local function slice_of(ctype)
+	ctype = typeof(ctype)
+	local ctid = tonumber(ctype)
+	local ct = slicetab[ctid]
+	if not ct then
+		ct = slice_newct(ctype)
+		slicetab[ctid] = ct
+	end
+	return ct
+end
 
 ---- vectors -------------------------------------------------------------------
 
@@ -162,21 +224,6 @@ local function vec_table(vec)
 	return cdata2tab(vec.data, vec.num)
 end
 
-local function vec_len(vec)
-	return vec.num
-end
-
-local function vec_tostring(vec)
-	local buf = buffer.new()
-	buf:put("[")
-	-- TODO: use cdata pretty print here
-	for i=0, vec.num-1 do
-		buf:put(" ", tostring(vec.data[i]))
-	end
-	buf:put(" ]")
-	return tostring(buf)
-end
-
 local function vec_newct(ctype)
 	return ffi.metatype(typeof([[
 		struct {
@@ -186,7 +233,6 @@ local function vec_newct(ctype)
 		}
 	]], ctype), {
 		__index = {
-			["m3$type"]  = "vec",
 			["m3$size"]  = sizeof(ctype),
 			["m3$align"] = alignof(ctype),
 			new          = vecct_new,
@@ -200,8 +246,9 @@ local function vec_newct(ctype)
 			delete       = vec_delete,
 			table        = vec_table
 		},
-		__len            = vec_len,
-		__tostring       = vec_tostring
+		__len            = slice_len,
+		__ipairs         = slice_ipairs,
+		__tostring       = slice_tostring
 	})
 end
 
@@ -221,8 +268,6 @@ local function vec_new(ctype, init)
 end
 
 ---- data frames ---------------------------------------------------------------
-
-local df_needpatch = setmetatable({}, {__mode="k"})
 
 local function df_allocfunc(cols)
 	local buf = buffer.new()
@@ -337,9 +382,35 @@ local function df_write(df, col, realloc)
 	end
 end
 
+local slicecache = {}
+
+local function df_writecopy(df, col, src)
+	if type(src) == "cdata" then
+		local ctid = tonumber(typeof(src))
+		if ctid == df["m3$ctptr"][col] then
+			-- fast path: it's a pointer
+			copy(df[col], src, df["m3$size"][col]*df.num)
+			return
+		end
+		local isslice = slicecache[ctid]
+		if isslice == nil then
+			-- this checks for both fhk slices and our arrays/slices
+			isslice = pcall(function() return src.data end)
+			slicecache[ctid] = isslice
+		end
+		if isslice then
+			return df_writecopy(df, col, src.data)
+		end
+		-- otherwise: fall through to copy loop
+	end
+	for i=0, df.num-1 do
+		df[col][i] = src[i]
+	end
+end
+
 local function df_overwrite(df, col, src)
 	df_write(df, col)
-	copy(df[col], src, df["m3$size"][col]*df.num)
+	df_writecopy(df, col, src)
 end
 
 local function df_emptyfunc(cols)
@@ -509,17 +580,18 @@ local function df_pretty(df, ...)
 	de.putpp(df_table(df), ...)
 end
 
-local function df_newct(proto)
+local function df_of(proto)
 	local c = {}
-	local size, align = {}, {}
+	local size, align, ctid, ctptr = {}, {}, {}, {}
 	local ctdef = buffer.new()
 	local ctarg = {}
 	ctdef:put("struct { uint32_t num; uint32_t cap; ")
-	for name, col in pairs(proto) do
-		local ctype = col.ctype
+	for name, ctype in pairs(proto) do
 		table.insert(c, {name=name, ctype=ctype})
 		size[name] = sizeof(ctype)
 		align[name] = alignof(ctype)
+		ctid[name] = tonumber(ctype)
+		ctptr[name] = tonumber(typeof("$*", ctype))
 		ctdef:putf("$ *%s; ", name)
 		table.insert(ctarg, ctype)
 	end
@@ -530,13 +602,12 @@ local function df_newct(proto)
 	local df_delete = df_deletefunc(c)
 	local df_copyrow = df_copyrowfunc(c)
 	local df_addrows = df_addrowsfunc()
-	return ffi.metatype(ffi.typeof(tostring(ctdef), unpack(ctarg)), {
+	return ffi.metatype(typeof(tostring(ctdef), unpack(ctarg)), {
 		__index = {
-			["m3$type"]   = "dataframe",
 			["m3$size"]   = size,
+			["m3$ctid"]   = ctid,
+			["m3$ctptr"]  = ctptr,
 			["m3$align"]  = align,
-			["m3$proto"]  = proto,
-			["m3$settab"] = df_settab,
 			["m3$pretty"] = df_pretty,
 			empty         = dfct_empty,
 			setcols       = df_setcols,
@@ -546,6 +617,7 @@ local function df_newct(proto)
 			addrows       = df_addrows,
 			addrow        = df_addrow,
 			setrows       = df_setrows,
+			settab        = df_settab,
 			clear         = df_clear,
 			mutate        = df_mutate,
 			write         = df_write,
@@ -557,43 +629,16 @@ local function df_newct(proto)
 	})
 end
 
-local df_ctcache = setmetatable({}, {
-	__index = function(self, proto)
-		--prototype.lock(proto) --TODO?
-		self[proto] = df_newct(proto)
-		return self[proto]
-	end
-})
-
-local function df_protoct(proto)
-	return df_ctcache[proto]
-end
-
 local function df_new(proto)
-	proto = prototype.toproto(proto)
-	if state.ready then
-		return df_protoct(proto):empty()
-	else
-		local ptr = patchptr.new()
-		prototype.setpatchptr(ptr, proto)
-		df_needpatch[ptr] = proto
-		return ptr
-	end
-end
-
-local function startup()
-	for ptr, proto in pairs(df_needpatch) do
-		local df = df_protoct(proto):empty()
-		patchptr.patch(ptr, typeof(df), df)
-	end
-	df_needpatch = nil
+	return df_of(proto):empty()
 end
 
 --------------------------------------------------------------------------------
 
 return {
-	vec       = vec_new,
-	vec_ctype = vec_of,
-	dataframe = df_new,
-	startup   = startup
+	slice_of     = slice_of,
+	vec_of       = vec_of,
+	vec          = vec_new,
+	dataframe_of = df_of,
+	dataframe    = df_new
 }

@@ -24,5 +24,4 @@ return {
 	parallel = parallel,
 	fork     = fork,
 	mode     = parallel and "mp" or "serial",
-	ready    = false, -- toggled by m3_startup
 }

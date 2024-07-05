@@ -13,27 +13,20 @@ package.loaded["m3_host"] = host
 -- must go before anything else (except host).
 require("m3_effect").startup()
 
-require("m3_array").startup()
-require("m3_struct").startup()
+-- must go after effect, before access
+require("m3_layout").startup()
 
--- must go after array
-require("m3_prototype").startup()
-
--- must go right after prototype
+-- must go after layout, before pip
 if host.on_data then host.on_data() end
 
+-- must go after host.on_data
 require("m3_pipe").startup()
 
+-- must go before fhk
+require("m3_access").startup()
+
+-- must go after access
 require("m3_fhk").startup()
-
--- two reasons to flush() here:
---   (1) startup does some naughty things with pointers (see m3_patchptr.lua), so this makes sure
---       there's no traces referencing the patched pointers.
---   (2) we don't need any of the startup code anymore, we need to jit simulation code now.
---       this saves a trace flush in the forked worker processes.
-jit.flush()
-
-state.ready = true
 
 -- this must go last.
 return mode.startup()

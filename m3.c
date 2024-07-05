@@ -385,7 +385,11 @@ static int runtests(m3_Init *init)
 		lua_State *L = m3_newstate(init);
 		if (!L) return -1;
 		m3_pushrun(L);
-		report(L, pcalltb(L, 0, 0));
+		if (pcalltb(L, 0, 0)) {
+			lua_getfield(T, LUA_REGISTRYINDEX, "fail");
+			lua_pushstring(T, lua_tostring(L, -1));
+			lua_call(T, 1, 0);
+		}
 		m3_close(L);
 	}
 }

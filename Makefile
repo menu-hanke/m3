@@ -96,13 +96,14 @@ M3A_O          = libm3.o
 M3GENLUA       = m3_cdef.lua
 
 ifeq (y,$(LINKLUA))
-M3LUA_O        = m3.lua.o m3_api.lua.o m3_array.lua.o m3_cdef.lua.o m3_channel.lua.o \
-				 m3_control.lua.o m3_data.lua.o m3_debug.lua.o m3_effect.lua.o m3_fhk.lua.o \
-				 m3_hook.lua.o m3_ipc.lua.o m3_loop.lua.o m3_mem.lua.o m3_mp.lua.o \
-				 m3_mp_main.lua.o m3_mp_worker.lua.o m3_patchptr.lua.o m3_pipe.lua.o \
-				 m3_prototype.lua.o m3_serial.lua.o m3_shm.lua.o m3_shutdown.lua.o \
-				 m3_startup.lua.o m3_state.lua.o m3_struct.lua.o m3_tree.lua.o
-M3EXELUA_O     = m3_input_ndjson.lua.o m3_simulate.lua.o m3_test.lua.o
+M3LUA_O        = m3.lua.o m3_access.lua.o m3_api.lua.o m3_array.lua.o m3_cdata.lua.o m3_cdef.lua.o \
+				 m3_channel.lua.o m3_control.lua.o m3_data.lua.o m3_data_frame.lua.o \
+				 m3_data_query.lua.o m3_data_struct.lua.o m3_debug.lua.o m3_effect.lua.o \
+				 m3_fhk.lua.o m3_hook.lua.o m3_ipc.lua.o m3_layout.lua.o m3_loop.lua.o \
+				 m3_mem.lua.o m3_mp.lua.o m3_mp_main.lua.o m3_mp_worker.lua.o m3_pipe.lua.o \
+				 m3_serial.lua.o m3_shm.lua.o m3_shutdown.lua.o m3_startup.lua.o m3_state.lua.o \
+				 m3_tree.lua.o
+M3EXELUA_O     = m3_input_data.lua.o m3_input_ndjson.lua.o m3_simulate.lua.o m3_test.lua.o
 endif
 
 ifeq (y,$(LINKJIT))

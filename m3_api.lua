@@ -43,7 +43,10 @@ m3.fhk = {
 m3.save            = mem.save
 m3.load            = mem.load
 
-m3.read            = data.read
+m3.data            = data.data
+m3.meta            = data.meta
+m3.typeof          = data.typeof
+
 m3.forest          = tree.forest
 m3.parallel        = state.parallel
 

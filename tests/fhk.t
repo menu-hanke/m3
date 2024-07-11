@@ -72,6 +72,34 @@ test("fhk:automapping", function()
 	end)
 end)
 
+test("fhk:mangle", function()
+	m3.data("df", m3.dataframe())
+	defgraph [[
+		model(df) event{a{x}} = a{x}+1
+		model(df) x = a{x}
+	]]
+	local write = m3.write("df")
+	local query = m3.read("df#x")
+	local event = m3.graphfn "event"
+	simulate(function()
+		write {{}}
+		event()
+		assert(query()[0] == 1)
+	end)
+end)
+
+test("fhk:init", function()
+	m3.data("struct", m3.struct())
+	defgraph [[
+		model(struct) init{x} = y
+	]]
+	local query = m3.read("struct#x")
+	input { {struct = {y=123}} }
+	simulate(function()
+		assert(query() == 123)
+	end)
+end)
+
 test("fhk:graphfn", function()
 	local struct = m3.data("struct", m3.struct())
 	defgraph [[

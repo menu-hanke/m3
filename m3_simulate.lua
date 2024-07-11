@@ -149,6 +149,10 @@ local function loaddriver()
 	end
 end
 
+-- TODO: this graph function should get special treatment,
+-- eg. inputs that are only referenced from this should not be saved in memory etc.
+local initfn = m3.graphfn "init"
+
 local inputdef = m3.effect(function()
 	local input = loadinput()
 	if input.next and not input.read then
@@ -172,11 +176,16 @@ function host.on_data()
 		end
 		m3.pipe.connect(inpipe, function(v)
 			inputread(v)
+			initfn()
 			return driver()
 		end)
 	else
 		local inputread = assert(input.read, "input must define at least one of `next' or `read'")
-		host.work = function() return inputread() ~= false and driver() end
+		host.work = function()
+			if inputread() == false then return end
+			initfn()
+			return driver()
+		end
 	end
 end
 

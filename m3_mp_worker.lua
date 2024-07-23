@@ -3,7 +3,7 @@ assert(require("m3_mp").role == "worker")
 local shm = require "m3_shm"
 shm.proc_startup()
 
-local channel = require "m3_channel"
+local effect = require "m3_effect"
 local host = require "m3_host"
 local ipc = require "m3_ipc"
 local mem = require "m3_mem"
@@ -12,7 +12,7 @@ local ffi = require "ffi"
 
 local proc = shm.proc()
 local C, cast = ffi.C, ffi.cast
-local worker_idle, worker_crash = mp.worker_idle, mp.worker_crash
+local worker_idle, worker_crash = mp.worker_idle.send, mp.worker_crash.send
 local cycle = mp.work_cycle
 local cycle_fut = shm.heap:new("m3_Future")
 cycle_fut.data = 1
@@ -21,7 +21,7 @@ cycle_fut:complete()
 ---- Input ---------------------------------------------------------------------
 
 local work = host.sync and (function()
-	local inputs = channel.dispinput()
+	local inputs = mp.work:torecv()
 	local decode = ipc.decode
 	local in_queue = mp.in_queue
 	local wcycle = mp.write_cycle
@@ -70,7 +70,7 @@ local work = host.sync and (function()
 			goto again
 		end
 	end
-end)() or host.work
+end)() or effect.unwrap(host.work)
 
 ---- Output --------------------------------------------------------------------
 
@@ -79,7 +79,7 @@ do
 	local encode = ipc.encode
 	local queue = mp.out_queue
 	local fut = shm.heap:new("m3_Future")
-	channel.setoutput(function(x, chan)
+	mp.main:tosend(function(x, chan)
 		C.m3__mp_queue_write(queue, cast(uintptr_ct, encode(chan, x)), fut)
 		fut:wait_sync()
 	end)

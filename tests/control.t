@@ -1,12 +1,13 @@
 -- vim: ft=lua
 local m3 = require "m3_api"
 
-local tree = pipe.tree()
-local result = {}
-connect(tree, result)
+local restree = tree()
+local result = tab()
+connect(restree, result)
 
+local writeres = write(restree)
 local function put(x)
-	return function() tree(x) end
+	return function() writeres(x) end
 end
 
 local function walk(tree, idx, node)
@@ -25,8 +26,9 @@ local function walk(tree, idx, node)
 	return child
 end
 
+local readres = read(result)
 local function check(root)
-	local tree = assert(result[1], "no tree")
+	local tree = assert(readres()[1], "no tree")
 	local idx = walk(tree, -1, root)
 	assert(idx == tree.committed+1, "wrong tree size")
 end
@@ -97,13 +99,19 @@ test.simulate("control:nothing", function()
 end)
 
 test("control:optional", function()
-	local state = m3.new("struct { uint32_t bit; uint32_t value; }", "vstack")
-	state.bit = 0
-	state.value = 0
+	local state = m3.cdata("struct { uint32_t bit; uint32_t value; }")
+	local wstate = write(state)
+	local rstate = read(state)
 	local seen = {}
-	local function toggle() state.value = state.value+2^state.bit end
-	local function nextbit() state.bit = state.bit + 1 end
-	local function setseen() seen[state.value] = true end
+	local function toggle()
+		local s = wstate()
+		s.value = s.value+2^s.bit
+	end
+	local function nextbit()
+		local s = wstate()
+		s.bit = s.bit + 1
+	end
+	local function setseen() seen[rstate().value] = true end
 	simulate(function()
 		exec(all {
 			optional(toggle), nextbit,

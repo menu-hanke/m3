@@ -1,19 +1,23 @@
-assert(require("m3_state").mode == "mp")
-
 local cdef = require "m3_cdef"
-local state = require "m3_state"
+local environment = require "m3_environment"
 local ffi = require "ffi"
 local C = ffi.C
 
+assert(environment.mode == "mp")
+
 local VMSIZE_PROC = cdef.M3_VMSIZE_PROC
 
-local base = bit.band(
-	ffi.cast("uintptr_t", state.shared) + VMSIZE_PROC,
-	bit.bnot(VMSIZE_PROC-1)
-)
-
+-- map from lowest to highest addr
+--   * shared heap
+--   * main process heap
+--   * `environment.parallel` × worker heaps
+-- and one extra region for alignment
+local mapsize = VMSIZE_PROC*(environment.parallel+3)
+local mapping = C.m3__mem_map_shared(mapsize)
+local base = bit.band(ffi.cast("intptr_t", mapping)+(VMSIZE_PROC-1), bit.bnot(VMSIZE_PROC-1))
 local shared = ffi.cast("m3_Shared *", base)
 shared.heap.cursor = base + ffi.sizeof("m3_Shared")
+ffi.gc(shared, function() C.m3__mem_unmap(mapping, mapsize) end)
 
 local tmpsize_t = ffi.new("size_t[1]")
 
@@ -81,7 +85,6 @@ end
 
 return {
 	proc_startup     = proc_startup,
-	base             = base,
 	heap             = heap,
 	with_shared_heap = with_shared_heap,
 	proc             = proc

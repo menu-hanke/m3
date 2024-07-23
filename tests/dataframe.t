@@ -24,14 +24,13 @@ end
 
 test("dataframe:readwrite", function()
 	local df = m3.dataframe()
-	local mutate = m3.mutate(df)
+	local write = m3.write(df)
 	local readxy = m3.read(df.x, df.y)
 	simulate(function()
-		mutate(function(o)
-			o:addrow({x=1, y=-1})
-			o:addrow({x=2, y=-2})
-			o:addrow({x=3, y=-3})
-		end)
+		local o = write()
+		o:addrow({x=1, y=-1})
+		o:addrow({x=2, y=-2})
+		o:addrow({x=3, y=-3})
 		local x, y = readxy()
 		checkv(x, {1, 2, 3})
 		checkv(y, {-1, -2, -3})
@@ -40,11 +39,11 @@ end)
 
 test("dataframe:writeempty", function()
 	local df = m3.dataframe()
-	local readn = m3.read(#df)
+	local read = m3.read(df)
 	local write = m3.write(df)
 	simulate(function()
 		write{}
-		assert(readn() == 0)
+		assert(#read() == 0)
 	end)
 end)
 
@@ -112,36 +111,35 @@ end)
 
 test("dataframe:append-savepoint", function()
 	local df = m3.dataframe()
-	local mutate = m3.mutate(df)
+	local write = m3.write(df)
 	local readx = m3.read(df.x)
 	simulate(function()
-		mutate(function(o) o:addrow { x=1 } end)
+		write():addrow { x=1 }
 		local fp = m3.save()
 		checkv(readx(), {1})
-		mutate(function(o) o:addrow { x=2 } end)
+		write():addrow { x=2 }
 		checkv(readx(), {1, 2})
 		m3.load(fp)
 		checkv(readx(), {1})
 	end)
 end)
 
-test("dataframe:delete", function()
+test("dataframe:clear", function()
 	local df = m3.dataframe()
-	local mutate = m3.mutate(df)
+	local write = m3.write(df)
 	local readx = m3.read(df.x)
 	local ready = m3.read(df.y)
 	simulate(function()
-		mutate(function(o)
-			o:settab {
-				x = {0,1,2,3,4,5,6,7,8,9},
-				y = {0,-1,-2,-3,-4,-5,-6,-7,-8,-9}
-			}
-			o:delete(8)
-		end)
+		local o = write()
+		o:settab {
+			x = {0,1,2,3,4,5,6,7,8,9},
+			y = {0,-1,-2,-3,-4,-5,-6,-7,-8,-9}
+		}
+		o:clear(8)
 		checkv(readx(), {0,1,2,3,4,5,6,7,9})
 		checkv(ready(), {0,-1,-2,-3,-4,-5,-6,-7,-9})
 		local fp = m3.save()
-		mutate(function(o) o:delete{0,1,2,6} end)
+		write():clear{0,1,2,6}
 		checkv(readx(), {3,4,5,7,9})
 		checkv(ready(), {-3,-4,-5,-7,-9})
 		m3.load(fp)

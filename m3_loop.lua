@@ -4,6 +4,7 @@
 -- also, this ensures future() is not called before forking.
 assert(require("m3_mp").role == "main")
 
+require "m3_ipc" -- future metatype
 local shm = require "m3_shm"
 local ffi = require "ffi"
 

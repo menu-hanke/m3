@@ -3,7 +3,6 @@ if host_shutdown then
 	host_shutdown()
 end
 
-local state = require "m3_state"
-if state.mode == "mp" then
+if require("m3_environment").mode == "mp" then
 	require("m3_mp").shutdown()
 end

@@ -1,90 +1,215 @@
 local data = require "m3_data"
-local data_query = require "m3_data_query"
 local effect = require "m3_effect"
-local fhk = require "m3_fhk"
+local event = require "m3_event"
 local buffer = require "string.buffer"
-local ffi = require "ffi"
+local dispatch = event.dispatch
 
-local reads = {}  --> trampoline => stmt
-local writes = {} --> proxy => stmt
+-- circular import workaround
+local function getgraph() return require("m3_fhk").graph end
 
-local marker_mt = {}
+local cache = {
+	read             = {},
+	write            = {},
+	read_trampoline  = {},
+	write_trampoline = {},
+	read_stmt        = {},
+	write_stmt       = {}
+}
 
-local function ismarker(x)
-	return getmetatable(x) == marker_mt
+local function effect_newindex(t, k, v)
+	effect.change()
+	rawset(t, k, v)
 end
 
-local function mark(x,m)
-	return setmetatable({data=x, mark=m}, marker_mt)
+local marker_mt = {__index=effect_newindex}
+
+local function ismarker(x,m)
+	return getmetatable(x) == marker_mt and (x.m == m or not m)
 end
 
-local function direct(x)
-	return mark(x, {direct=true})
+local function patch(x, f)
+	return setmetatable({x=x, f=f, m="patch"}, marker_mt)
 end
 
-local function unpackdef(stmt, src)
-	if effect.iseffect(src) then
-		return unpackdef(stmt, src())
-	elseif ismarker(src) then
-		return mark(unpackdef(stmt, src.data), src.mark)
-	elseif type(src) == "string" then
-		if stmt.access == "read" then
-			if not stmt.query then
-				stmt.query = data_query.new()
-			end
-			return stmt.query[src]
-		else
-			return unpackdef(stmt, data.data(src))
-		end
-	elseif type(src) == "function" then
-		return src
-	else
-		local d = data.desc(src)
-		if d then
-			effect.set(d, stmt.access, true)
-			return d
-		else
-			local proto = {}
-			for k,v in pairs(src) do
-				proto[k] = unpackdef(stmt, v)
-			end
-			return proto
-		end
-	end
+local function defer(f)
+	return patch(nil, f)
 end
+
+local function capture(f)
+	return setmetatable({f=f, m="capture"}, marker_mt)
+end
+
+local function splat(x)
+	return setmetatable({x=x, m="splat"}, marker_mt)
+end
+
+local function sink(values)
+	return setmetatable({m="sink", values=values}, marker_mt)
+end
+
+local function use(x, ...)
+	return setmetatable({m="use", x=x, ...}, marker_mt)
+end
+
+local expand
 
 local function read(...)
+	local values = {...}
+	if #values == 1 and ismarker(values[1], "splat") then
+		values = values[1].x
+	end
+	local v1 = #values == 1 and values[1]
+	if type(v1) == "function" then return v1 end
+	if cache.read_stmt[v1] then return cache.read_stmt[v1] end
 	local trampoline = load("local target return function() return target() end")()
-	local stmt = { access = "read" }
-	local args = {...}
-	stmt.def = effect.effect(function() return unpackdef(stmt, args) end)
-	reads[trampoline] = stmt
+	local stmt = {}
+	cache.read_trampoline[trampoline] = effect.effect(function()
+		return {stmt=stmt, values=expand("read", values, stmt)}
+	end)
+	if v1 then cache.read_stmt[v1] = trampoline end
 	return trampoline
 end
 
 local function write(...)
-	local proxy = ffi.new("struct {}")
-	local stmt = { access = "write" }
-	local args = {...}
-	stmt.def = effect.effect(function() return unpackdef(stmt, args) end)
-	writes[proxy] = stmt
-	return proxy
+	local values = {...}
+	local splat = #values == 1 and ismarker(values[1], "splat")
+	if splat then values = values[1].x end
+	local v1 = #values == 1 and values[1]
+	if type(v1) == "function" then return v1 end
+	if cache.write_stmt[v1] then return cache.write_stmt[v1] end
+	local args
+	if splat then
+		args = "..."
+	else
+		args = {}
+		for i=1, #values do args[i] = string.format("v%d", i) end
+		args = table.concat(args, ",")
+	end
+	local trampoline = load(string.format(
+		"local target return function(%s) return target(%s) end",
+		args, args
+	))()
+	local stmt = {use={}}
+	cache.write_trampoline[trampoline] = effect.effect(function()
+		return {stmt=stmt, values=expand("write", values, stmt)}
+	end)
+	if v1 then cache.write_stmt[v1] = trampoline end
+	return trampoline
+end
+
+local function writedesc(x, stmt)
+	if ismarker(x, "use") then
+		for _,v in ipairs(x) do
+			stmt.use[v] = true
+		end
+	else
+		stmt.use[x] = true
+	end
+	local graph = getgraph()
+	if (not cache.write[graph.mask]) and graph:mapping(x) then
+		write(graph.mask)
+	end
+end
+
+local function expandstr(access, s, stmt)
+	if access == "read" then
+		if not stmt.query_expr then
+			stmt.query_expr = {}
+		end
+		local qexpr = stmt.query_expr[s]
+		if qexpr == nil then
+			local graph = getgraph()
+			if graph:isexpr(s) then
+				if not stmt.query then
+					stmt.query = graph:query()
+					stmt.query_vmctx = write(graph)
+				end
+				graph.G:insert(stmt.query, s)
+				table.insert(stmt.query_expr, s)
+				stmt.query_expr[s] = #stmt.query_expr
+				return s
+			end
+			stmt.query_expr[s] = false
+			-- fallthrough
+		elseif qexpr ~= false then
+			return s
+		end
+	end
+	return expand(access, data.data(s), stmt)
+end
+
+expand = function(access, x, stmt)
+	if access == "write" then writedesc(x, stmt) end
+	if ismarker(x, "use") then
+		return expand(access, x.x, stmt)
+	end
+	local v = cache[access][x]
+	if v then
+		return expand(access, v, stmt)
+	end
+	if effect.iseffect(x) then
+		return expand(access, x(), stmt)
+	end
+	local meta = data.meta(x)
+	if meta then
+		local acm = meta[access]
+		if not acm then error(string.format("`%s' doesn't support %s access", x, access)) end
+		if type(acm) == "function" then
+			acm = acm(x)
+			cache[access][x] = acm
+		end
+		effect.change()
+		return expand(access, acm, stmt)
+	end
+	if ismarker(x, "capture") then
+		return capture(expand(access, x.f, stmt))
+	end
+	if ismarker(x, "sink") then
+		expand(access, x.values, stmt)
+		-- woosh all ur values are gone
+		return {}
+	end
+	if type(x) == "table" and not ismarker(x) then
+		local xs = {}
+		for k,v in pairs(x) do
+			xs[k] = expand(access, v, stmt)
+		end
+		return xs
+	end
+	if type(x) == "string" then
+		return expandstr(access, x, stmt)
+	end
+	return x
+end
+
+local function get(x)
+	local r = cache.read[x] or getgraph():mapping(x)
+	local w = cache.write[x]
+	if r and w then
+		return "rw"
+	elseif r then
+		return "r"
+	elseif w then
+		return "w"
+	else
+		return ""
+	end
 end
 
 local function forward(w, r)
 	return load([[
 		local write, read = ...
 		return function() return write(read()) end
-	]])(write(w), read(direct(r)))
+	]])(write(w), read(r))
 end
 
-local function mutate(o)
-	return load([[
-		local write, read = ...
-		return function(f, ...)
-			return write(f(read(), ...))
-		end
-	]])(write(o), read(o))
+local function connect(source, sink)
+	local conn = data.meta(source).connect
+	if type(conn) == "function" then
+		return conn(source, sink)
+	else
+		return connect(conn, sink)
+	end
 end
 
 local function newuv(uv, v)
@@ -113,170 +238,185 @@ local function emituv(buf, uv)
 	return vs
 end
 
-local function emitread(ctx, value)
-	if type(value) == "function" then
-		ctx.tail:putf("%s()\n", newuv(ctx.uv, value))
-	elseif ismarker(value) then
-		local idx = #ctx.markers+1
-		ctx.markers[idx] = value.mark
-		emitread(ctx, value.data)
-		ctx.markers[idx] = nil
+local function emitpatch(patch)
+	if patch.f then
+		patch.x = patch.f(patch.x)
+		patch.f = nil
+	end
+	return patch.x
+end
+
+local function emitread(stmt, buf, uv, read)
+	if type(read) == "function" then
+		buf:putf("%s()", newuv(uv, read))
+	elseif type(read) == "string" then
+		buf:putf("q%d", stmt.query_expr[read])
+	elseif ismarker(read, "patch") then
+		emitread(stmt, buf, uv, emitpatch(read))
 	else
-		local meta = data.meta(value)
-		if meta then
-			local v = meta.read(value, ctx)
-			if v then emitread(ctx, v) end
-		else
-			ctx.tail:put("{")
-			for k,v in pairs(value) do
-				ctx.tail:putf("[%s] = ", newuv(ctx.uv, k))
-				emitread(ctx, v)
-				ctx.tail:put(",")
-			end
-			ctx.tail:put("}")
+		buf:put("{")
+		for k,v in pairs(read) do
+			buf:putf("[%s] = ", newuv(uv, k))
+			emitread(stmt, buf, uv, v)
+			buf:put(",")
 		end
+		buf:put("}")
 	end
 end
 
-local function ctx_checkmark(ctx, f)
-	if type(f) == "table" then
-		local t = f
-		f = function(x)
-			for k,v in pairs(t) do
-				if x[k] ~= v then
-					return false
-				end
-			end
-			return true
-		end
+local function compileread(stmt, values, buf, buf2)
+	local uv = {}
+	local vmctx = newuv(uv, stmt.query_vmctx)
+	for i,v in ipairs(values) do
+		if i>1 then buf:put(", ") end
+		emitread(stmt, buf, uv, v)
 	end
-	for i=1, #ctx.markers do
-		if f(ctx.markers[i]) then
-			return true
+	local uval = emituv(buf2, uv)
+	buf2:put("return function()\n")
+	if stmt.query then
+		buf2:put("local q1")
+		for i=2, #stmt.query_expr do
+			buf2:putf(", q%d", i)
 		end
+		buf2:putf(" = %s():query(%d)\n", vmctx, stmt.query)
 	end
-	return false
+	buf2:put("return ", buf, "\nend")
+	return assert(load(buf2))(unpack(uval))
 end
 
-local ctx_mt = {
-	__index = {
-		checkmark = ctx_checkmark
-	}
-}
-
-local function compileread(stmt)
-	local ctx = setmetatable({
-		head    = buffer.new(),
-		tail    = buffer.new(),
-		uv      = {},
-		markers = {}
-	}, ctx_mt)
-	for i,v in ipairs(stmt.def.value) do
-		if i>1 then ctx.tail:put(", ") end
-		emitread(ctx, v)
-	end
-	local buf = buffer.new()
-	local uv = emituv(buf, ctx.uv)
-	buf:put("return function()\n")
-	buf:put(ctx.head)
-	buf:put("return ")
-	buf:put(ctx.tail)
-	buf:put("\nend")
-	return assert(load(buf))(unpack(uv))
-end
-
-local function writemask(ctx, obj)
-	if type(obj.node) == "number" then
-		if not ctx.mask then
-			ctx.mask = fhk.mask()
-			ctx.uv.setmask = fhk.setmask
+local function emitwrite(buf, uv, value, write, root)
+	if ismarker(write, "capture") then
+		if root then
+			buf:putf("local r%d = ", root)
 		end
-		fhk.insertmask(ctx.mask, obj.node)
-	end
-	local meta = data.meta(obj)
-	if meta and meta.pairs then
-		for _, o in meta.pairs(obj) do
-			writemask(ctx, o)
+		emitwrite(buf, uv, value, write.f)
+		if root then
+			return string.format("r%d", root)
 		end
-	end
-end
-
-local function emitwrite(ctx, value, consumer)
-	if type(consumer) == "function" then
-		ctx.buf:putf("%s(%s)\n", newuv(ctx.uv, consumer), value)
-		return consumer
-	elseif ismarker(consumer) then
-		return emitwrite(ctx, value, consumer.data)
+	elseif type(write) == "function" then
+		buf:putf("%s(%s)\n", newuv(uv, write), value)
+	elseif ismarker(write, "patch") then
+		return emitwrite(buf, uv, value, emitpatch(write), root)
 	else
-		local meta = data.meta(consumer)
-		if meta then
-			writemask(ctx, consumer)
-			local f, name = meta.write(consumer)
-			emitwrite(ctx, value, f)
-			return f, name
+		buf:putf("if %s ~= nil then\n", value)
+		for k,v in pairs(write) do
+			emitwrite(buf, uv, string.format("%s[%s]", value, newuv(uv, k)), v)
+		end
+		buf:put("end\n")
+	end
+end
+
+local function writemasks(stmt)
+	if stmt.mmask then
+		return stmt.mmask, stmt.gnodes
+	end
+	local mmask, gnodes = 0ull, {}
+	local graph = getgraph()
+	for w,_ in pairs(stmt.use) do
+		if cache.write_trampoline[w] then
+			local wmask, wnodes = writemasks(cache.write_trampoline[w].value.stmt)
+			mmask = bit.bor(mmask, wmask)
+			for node in pairs(wnodes) do gnodes[node] = true end
 		else
-			local t = {}
-			ctx.buf:putf("if %s ~= nil then\n", value)
-			for k,v in pairs(consumer) do
-				local x, name = emitwrite(ctx, string.format("%s[%s]", value, newuv(ctx.uv, k)), v)
-				if type(k) ~= "number" or not name then name = k end
-				t[name] = x
+			if data.typeof(w) == "mem.slot" then
+				mmask = bit.bor(mmask, require("m3_mem").slotmask(w))
 			end
-			ctx.buf:putf("end\n")
-			return t
+			local node = graph:mapping(w)
+			if node then
+				gnodes[node] = true
+			end
 		end
 	end
+	if next(gnodes) and cache.write[graph] then
+		mmask = bit.bor(mmask, require("m3_mem").slotmask(graph.mask))
+	end
+	stmt.mmask, stmt.gnodes = mmask, gnodes
+	return mmask, gnodes
 end
 
-local function write_newindex(stmt, key, value)
-	stmt[key](value)
-end
-
-local function compilewrite(stmt)
-	local index = {}
-	local ctx = { buf=buffer.new(), uv={} }
-	for i,v in ipairs(stmt.def.value) do
-		local x, name = emitwrite(ctx, string.format("v%d", i), v)
-		if name then
-			index[name] = x
-		elseif type(x) == "table" then
-			for xk,xv in pairs(x) do index[xk] = xv end
+local function compilewrite(stmt, values, buf, buf2)
+	local mmask, gnodes = writemasks(stmt)
+	local uv, ret = {}, {}
+	if mmask ~= 0 then
+		uv.mem_setmask = require("m3_mem").setmask
+		buf:put("mem_setmask(", require("m3_mem").maskstr(mmask), ")\n")
+	end
+	local graph = getgraph()
+	if next(gnodes) and cache.write[graph] then
+		local mask = graph.G:mask()
+		for node in pairs(gnodes) do
+			graph.G:insert(mask, node)
 		end
+		uv.fhk_setmask = graph.mask.write
+		buf:putf("fhk_setmask(%d)\n", mask)
 	end
-	local buf = buffer.new()
-	local uv = emituv(buf, ctx.uv)
-	buf:put("return function(_")
-	for i=1, #stmt.def.value do
-		buf:putf(", v%d", i)
+	for i,v in ipairs(values) do
+		local r = emitwrite(buf, uv, string.format("v%d", i), v, i)
+		if r then table.insert(ret, r) end
 	end
-	buf:put(")\n")
-	buf:put(ctx.buf)
-	if ctx.mask then
-		buf:putf("setmask(%d\n)", ctx.mask)
+	local uval = emituv(buf2, uv)
+	buf2:put("return function(v1")
+	for i=2, #values do buf2:putf(", v%d", i) end
+	buf2:put(")\n", buf, "\n")
+	if #ret > 0 then
+		buf2:put("return ", table.concat(ret, ", "), "\n")
 	end
-	buf:put("end")
-	return {
-		__index    = index,
-		__newindex = write_newindex,
-		__call     = assert(load(buf))(unpack(uv))
-	}
+	buf2:put("end")
+	return assert(load(buf2))(unpack(uval))
+end
+
+local function dispatchread(...)
+	dispatch("read", ...)
+	return ...
+end
+
+local function trace_read(f)
+	return function() return dispatchread(f()) end
+end
+
+local function trace_write(f)
+	return function(...)
+		dispatch("write", ...)
+		return f(...)
+	end
 end
 
 local function startup()
-	for trampoline, stmt in pairs(reads) do
-		debug.setupvalue(trampoline, 1, compileread(stmt))
+	local buf, buf2 = buffer.new(), buffer.new()
+	for trampoline, fx in pairs(cache.read_trampoline) do
+		debug.setupvalue(trampoline, 1, compileread(fx.value.stmt, fx.value.values, buf, buf2))
+		buf:reset()
+		buf2:reset()
 	end
-	for proxy, stmt in pairs(writes) do
-		ffi.metatype(ffi.typeof(proxy), compilewrite(stmt))
+	for trampoline, fx in pairs(cache.write_trampoline) do
+		debug.setupvalue(trampoline, 1, compilewrite(fx.value.stmt, fx.value.values, buf, buf2))
+		buf:reset()
+		buf2:reset()
 	end
-	reads = nil
-	writes = nil
+	if event.listener() then
+		for trampoline in pairs(cache.read_trampoline) do
+			local _, f = debug.getupvalue(trampoline, 1)
+			debug.setupvalue(trampoline, 1, trace_read(f))
+		end
+		for trampoline in pairs(cache.write_trampoline) do
+			local _, f = debug.getupvalue(trampoline, 1)
+			debug.setupvalue(trampoline, 1, trace_write(f))
+		end
+	end
+	cache = nil
 end
 
 return {
 	read    = read,
 	write   = write,
+	get     = get,
 	forward = forward,
-	mutate  = mutate,
+	connect = connect,
+	patch   = patch,
+	defer   = defer,
+	capture = capture,
+	splat   = splat,
+	sink    = sink,
+	use     = use,
 	startup = startup
 }

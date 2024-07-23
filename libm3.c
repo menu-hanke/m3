@@ -6,3 +6,8 @@
 #include "mem.c"
 #include "mp.c"
 #include "state.c"
+
+#if M3_LUADEF
+CDEF void *malloc(size_t);
+CDEF void free(void *);
+#endif

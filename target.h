@@ -16,6 +16,5 @@
 #define M3_LINUX             1
 #endif
 
-#define M3_SP64              0
 #define M3_CACHELINE_SIZE    64
 #define M3_PAGE_SIZE         4096

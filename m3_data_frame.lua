@@ -1,173 +1,143 @@
+local access = require "m3_access"
 local array = require "m3_array"
 local cdata = require "m3_cdata"
-local effect = require "m3_effect"
 local fhk = require "m3_fhk"
-local layout = require "m3_layout"
+local mem = require "m3_mem"
 local ffi = require "ffi"
 
-local function emitread(df, field)
-	return load(string.format("local df = ... return function() return df.%s end", field))(df.obj)
+local DF_OBJ = -1
+
+local function col_read(col)
+	return access.defer(function()
+		return load(string.format([[
+			local df, slice = ...
+			return function() return slice(df.%s, df.num) end
+		]], col.name))(col.df[DF_OBJ].ptr, array.slice_of(col.ctype))
+	end)
 end
 
-local function emitslice(col)
-	return assert(load(string.format([[
-		local slice, df = ...
-		return function() return slice(df.%s, df.num) end
-	]], col.name)))(array.slice_of(col.ctype), col.df.obj)
-end
-
-local function col_emitread(col, ctx)
-	if ctx:checkmark({direct=true}) then
-		return emitread(col.df, col.name)
-	else
-		return emitslice(col)
-	end
-end
-
-local function col_emitwrite(col)
-	return load(string.format([[
-		local df = ...
-		return function(value)
-			if value == nil then
-				return df.%s
-			else
-				df:overwrite('%s', value)
-			end
-		end
-	]], col.name, col.name))(col.df.obj), col.name
-end
-
-local function col_emitgraph(col, tab, name)
-	local dfct = ffi.typeof(col.df.obj[0])
-	local base = ffi.cast("intptr_t", col.df.obj)
+local function col_map_(col, tab, name)
+	local slot = col.df[DF_OBJ]
 	return string.format(
-		"model(global) `%s`#`%s` = ldv.%s(lds.i64(0x%x), lds.u32(0x%x))",
+		"model(global) %s#%s = ldv.%s(lds.i64(0x%x), lds.u32(0x%x))",
 		tab,
 		name,
 		fhk.typesuffix(col.ctype),
-		base + ffi.offsetof(dfct, col.name),
-		base + ffi.offsetof(dfct, "num")
+		ffi.cast("intptr_t", slot.ptr) + ffi.offsetof(slot.ctype, cdata.ident(name)),
+		ffi.cast("intptr_t", slot.ptr) + ffi.offsetof(slot.ctype, "num")
+	)
+end
+
+local function col_map(col, tab, name)
+	access.read(col.df)
+	return function() return col_map_(col, tab, name) end
+end
+
+local function col_write(col)
+	return access.use(
+		access.defer(
+			function()
+				return access.capture(load(string.format([[
+					local df = ...
+					return function(v)
+						if v == nil then
+							return df.%s
+						else
+							df:overwrite(%q, v)
+						end
+					end
+				]], col.name, col.name))(col.df[DF_OBJ].ptr))
+			end
+		),
+		access.write(col.df)
 	)
 end
 
 local col_mt = {
-	["m3$meta"] = {
+	data = {
 		type  = "dataframe.col",
-		read  = col_emitread,
-		write = col_emitwrite,
-		graph = col_emitgraph
+		read  = col_read,
+		write = col_write,
+		map   = col_map
 	}
 }
 
-local function df_newcol(df, name)
-	local col = setmetatable({df=df, name=name}, col_mt)
-	col.proxy = effect.proxy(col)
-	getmetatable(col.proxy)["m3$meta"] = { descriptor = col }
-	df.cols[name] = col
-	return col
-end
-
-local function len_emitread(len)
-	return emitread(len.df, "num")
-end
-
-local function len_emitgraph(len, _, name)
-	return string.format(
-		"model(global) `%s` = {..lds.u32(0x%x)}",
-		name,
-		ffi.cast("intptr_t", len.df.obj) + ffi.offsetof(len.df.obj[0], "num")
-	)
-end
-
-local len_mt = {
-	["m3$meta"] = {
-		type  = "dataframe.len",
-		read  = len_emitread,
-		graph = len_emitgraph
-	}
-}
-
-local function df_len(df)
-	if not df.len then
-		df.len = setmetatable({df=df}, len_mt)
-	end
-	return df.len
+local function col_new(df, name)
+	return setmetatable({df=df, name=name}, col_mt)
 end
 
 local function df_index(df, name)
 	name = cdata.ident(name)
-	return df.cols[name] or df_newcol(df, name)
+	local col = col_new(df, name)
+	df[name] = col
+	return col
 end
 
-local function df_pairs(df)
-	return coroutine.wrap(function()
-		if df.len then coroutine.yield("", df.len) end
-		for name, col in pairs(df.cols) do
-			coroutine.yield(name, col)
-		end
-	end)
+local function df_read(df)
+	return df[DF_OBJ]
 end
 
-local function df_emitread(df)
-	if not df.reader then
-		df.reader = load("local df = ... return function() return df end")(df.obj)
-	end
-	return df.reader
+local function df_map_(df, name)
+	local slot = df[DF_OBJ]
+	return string.format(
+		"model(global) %s = {..lds.u32(0x%x)}",
+		name,
+		ffi.cast("intptr_t", slot.ptr) + ffi.offsetof(slot.ctype, "num")
+	)
 end
 
-local function df_emitwrite(df)
-	if not df.writer then
-		df.writer = load([[
-		local df = ...
-		return function(v)
-			if v == nil then
-				return df
-			else
-				return df:settab(v)
-			end
-		end
-	]])(df.obj)
-	end
-	return df.writer
+local function df_map(df, _, name)
+	access.read(df)
+	return function() return df_map_(df, name) end
 end
 
-local function df_layout(df)
+local function df_write(df)
+	local slot = df[DF_OBJ]
+	return access.use(
+		access.defer(function()
+			return access.capture(load([[
+				local ptr = ...
+				return function(v)
+					if v == nil then
+						return ptr
+					else
+						return ptr:settab(v)
+					end
+				end
+			]])(slot.ptr))
+		end),
+		access.write(slot)
+	)
+end
+
+local function df_ctype(slot)
 	local proto = {}
-	for name, col in pairs(df.cols) do
-		if col.read or col.write then
+	for name, col in pairs(slot.df) do
+		if type(name) == "string" and access.get(col) ~= "" then
 			col.ctype = ffi.typeof(col.ctype or "double")
-			proto[name] = col.ctype
+			if col.dummy == nil then
+				col.dummy = cdata.dummy(col.ctype)
+			end
+			table.insert(proto, col)
 		end
 	end
-	df.obj = array.dataframe(proto)
+	return array.df_of(proto)
 end
 
 local df_mt = {
-	["m3$meta"] = {
+	data = {
 		type  = "dataframe",
-		read  = df_emitread,
-		write = df_emitwrite,
-		len   = df_len,
-		index = df_index,
-		pairs = df_pairs
-	}
+		read  = df_read,
+		write = df_write,
+		map   = df_map
+	},
+	__index = df_index
 }
 
-local function df_new()
-	return setmetatable({
-		cols = {}
-	}, df_mt)
-end
-
 local function new()
-	local df = df_new()
-	local proxy = newproxy(true)
-	local mt = getmetatable(proxy)
-	mt.__index = function(_, name) return df_index(df, name).proxy end
-	mt.__len = function() return df_len(df) end
-	mt["m3$meta"] = { descriptor = df }
-	layout.call(df_layout, df)
-	return proxy
+	local df = setmetatable({ [DF_OBJ] = mem.slot { ctype=df_ctype }, }, df_mt)
+	df[DF_OBJ].df = df
+	return df
 end
 
 return {

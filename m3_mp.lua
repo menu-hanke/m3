@@ -1,42 +1,14 @@
-assert(require("m3_state").mode == "mp")
+assert(require("m3_environment").mode == "mp")
 
-local channel = require "m3_channel"
-local pipe = require "m3_pipe"
+local environment = require "m3_environment"
+local ipc = require "m3_ipc"
 local shm = require "m3_shm"
-local state = require "m3_state"
 local ffi = require "ffi"
 
 local C = ffi.C
 
-local worker_idle = pipe.shared_output()
-local worker_crash = pipe.shared_output()
-
-local function fut_completed(fut)
-	return fut.state == -1ULL
-end
-
-local function fut_complete(fut)
-	fut.state = -1ULL
-end
-
-local function fut_wait_sync(fut)
-	if not fut_completed(fut) then
-		repeat
-			C.m3__mp_proc_park(shm.proc())
-		until fut_completed(fut)
-	end
-end
-
-ffi.metatype(
-	"m3_Future",
-	{
-		__index = {
-			completed = fut_completed,
-			complete  = fut_complete,
-			wait_sync = fut_wait_sync
-		}
-	}
-)
+local main = ipc.dispatch() -- worker->main mpsc
+local work = ipc.dispatch() -- main->worker spmc
 
 local function newqueue(size)
 	return shm.with_shared_heap(function(heap)
@@ -54,21 +26,21 @@ end
 local function startup()
 	local host = require "m3_host"
 	-- TODO make inbuf/outbuf configurable
-	local inbuf = 4 * state.parallel
-	local outbuf = 8 * state.parallel
+	local inbuf = 4 * environment.parallel
+	local outbuf = 8 * environment.parallel
 	local mp = package.loaded["m3_mp"]
 	mp.out_queue = newqueue(outbuf)
 	mp.work_cycle = newevent()
 	mp.work_cycle.flag = 1
-	if host.sync == nil then host.sync = not not next(channel.inputs) end
+	if host.sync == nil then host.sync = #work > 0 end
 	if host.sync then
 		mp.in_queue = newqueue(inbuf)
 		mp.write_cycle = newevent()
-		mp.work_cycle.flag = 1
+		mp.write_cycle.flag = 1
 	end
 	local pids = {}
-	for i=1, state.parallel do
-		local pid = state.fork(function()
+	for i=1, environment.parallel do
+		local pid = environment.fork(function()
 			C.m3__mp_proc_id = i+1
 			mp.role = "worker"
 			return require("m3_mp_worker")()
@@ -89,7 +61,9 @@ end
 --------------------------------------------------------------------------------
 
 return {
-	worker_idle  = worker_idle,
-	worker_crash = worker_crash,
+	main         = main,
+	work         = work,
+	worker_idle  = main:channel(),
+	worker_crash = main:channel(),
 	startup      = startup
 }

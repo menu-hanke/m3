@@ -27,10 +27,12 @@
 #ifdef M3_LUADEF
 #define CDEF                 @cdef@
 #define LUADEF(...)          @lua@ __VA_ARGS__
+#define LUAVOID(x)           void
 #define CDEFFUNC             CDEF LUAFUNC
 #else
 #define CDEF
 #define LUADEF(...)
+#define LUAVOID(x)           x
 #define CDEFFUNC
 #endif
 

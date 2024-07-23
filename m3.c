@@ -61,11 +61,6 @@ static void version(void)
 			"(unknown version)"
 #endif
 			" ["
-#if M3_SP64
-			"sp64"
-#else
-			"sp32"
-#endif
 #if M3_WINDOWS
 			" win"
 #endif
@@ -75,7 +70,7 @@ static void version(void)
 #if M3_MMAP
 			" mmap"
 #endif
-			"]"
+			" ]"
 	);
 	puts(
 			LUAJIT_VERSION
@@ -167,6 +162,7 @@ static int locals(lua_State *L, int level)
 		const char *lname = lua_getlocal(L, &ar, i);
 		if(!lname) break;
 		lua_pop(L, 1);
+		if (!strcmp(lname, "(*temporary)")) continue;
 		luaL_addstring(&B, "\n\t");
 		luaL_addstring(&B, lname);
 		luaL_addstring(&B, ": ");

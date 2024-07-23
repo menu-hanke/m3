@@ -36,17 +36,17 @@ end)
 test("fhk:save", function()
 	local df1 = m3.data("df1", m3.dataframe())
 	local df2 = m3.data("df2", m3.dataframe())
-	local mutate1 = m3.mutate(df1)
-	local mutate2 = m3.mutate(df2)
+	local write1 = m3.write(df1)
+	local write2 = m3.write(df2)
 	local readxy = m3.read("sum(df1#x) + sum(df2#y)")
 	simulate(function()
-		mutate1(function(o) o:settab { x={1} } end)
+		write1():settab { x={1} }
 		assert(readxy() == 1)
 		local fp1 = m3.save()
-		mutate2(function(o) o:settab { y={1,2,3} } end)
+		write2():settab { y={1,2,3} }
 		assert(readxy() == 1+1+2+3)
 		local fp2 = m3.save()
-		mutate2(function(o) o:addrow { y=4 } end)
+		write2():addrow { y=4 }
 		assert(readxy() == 1+1+2+3+4)
 		m3.load(fp2)
 		assert(readxy() == 1+1+2+3)
@@ -62,10 +62,10 @@ test("fhk:automapping", function()
 		model(df) x = y + struct#x
 	]]
 	local query = m3.read("df#x")
-	local mutatedf = m3.mutate(df)
+	local writedf = m3.write(df)
 	local writesx = m3.write(struct.x)
 	simulate(function()
-		mutatedf(function(o) o:settab { y={1,2} } end)
+		writedf():settab { y={1,2} }
 		writesx(1)
 		local x = query()
 		assert(x[0] == 1+1 and x[1] == 1+2)
@@ -82,7 +82,7 @@ test("fhk:mangle", function()
 	local query = m3.read("df#x")
 	local event = m3.graphfn "event"
 	simulate(function()
-		write {{}}
+		write {{a_x_=0}}
 		event()
 		assert(query()[0] == 1)
 	end)

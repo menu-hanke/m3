@@ -3,18 +3,18 @@ assert(require("m3_mp").role == "main")
 local shm = require "m3_shm"
 shm.proc_startup()
 
-local channel = require "m3_channel"
+local effect = require "m3_effect"
+local environment = require "m3_environment"
 local host = require "m3_host"
 local ipc = require "m3_ipc"
 local loop = require "m3_loop"
 local mp = require "m3_mp"
-local state = require "m3_state"
 local ffi = require "ffi"
 
 local C, cast = ffi.C, ffi.cast
 local cycle = mp.work_cycle
 local run_noblock, run_until = loop.run_noblock, loop.run_until
-local parallel = state.parallel
+local parallel = environment.parallel
 
 local numidle
 local cyclenum = cycle.flag
@@ -27,7 +27,7 @@ if mp.in_queue then
 	local queue = mp.in_queue
 	local await_sync = loop.await_sync
 	local fut = loop.future()
-	channel.setinput(function(x, chan)
+	mp.work:tosend(function(x, chan)
 		--print("main: write", x, "on channel", chan)
 		C.m3__mp_queue_write(queue, cast(uintptr_ct, encode(chan, x)), fut)
 		await_sync(fut)
@@ -37,19 +37,19 @@ end
 
 ---- Output --------------------------------------------------------------------
 
-channel.settarget(mp.worker_idle, function(msg)
+function mp.worker_idle.recv(msg)
 	if msg.cycle == cyclenum then
 		numidle = numidle+1
 		--print("idle:", numidle, "on cycle", cyclenum)
 	end
-end)
+end
 
-channel.settarget(mp.worker_crash, function(msg)
+function mp.worker_crash.recv(msg)
 	error(msg)
-end)
+end
 
 do
-	local outputs = channel.dispoutput()
+	local outputs = mp.main:torecv()
 	local decode = ipc.decode
 	local out_queue = mp.out_queue
 	local await = loop.await
@@ -83,7 +83,7 @@ end
 
 local main_cycle
 if host.sync then
-	local work = host.work
+	local work = effect.unwrap(host.work)
 	local write_cycle = mp.write_cycle
 	main_cycle = function()
 		nextcycle()

@@ -1,11 +1,15 @@
-assert(require("m3_state").mode == "mp")
+assert(require("m3_environment").mode == "mp")
 
 local shm = require "m3_shm"
 local ffi = require "ffi"
 local buffer = require "string.buffer"
+require "table.new"
+require "table.clear"
 
 local C, cast, copy = ffi.C, ffi.cast, ffi.copy
 local heap = shm.heap
+
+---- Message handling ----------------------------------------------------------
 
 local msg_size = ffi.sizeof("m3_Message")
 --local msgtab_ct = ffi.typeof("m3_Message *[?]")
@@ -81,7 +85,92 @@ local function decode(ptr)
 	return chan, msg
 end
 
+---- Futures -------------------------------------------------------------------
+
+local function fut_completed(fut)
+	return fut.state == -1ULL
+end
+
+local function fut_complete(fut)
+	fut.state = -1ULL
+end
+
+local function fut_wait_sync(fut)
+	if not fut_completed(fut) then
+		repeat
+			C.m3__mp_proc_park(shm.proc())
+		until fut_completed(fut)
+	end
+end
+
+ffi.metatype(
+	"m3_Future",
+	{
+		__index = {
+			completed = fut_completed,
+			complete  = fut_complete,
+			wait_sync = fut_wait_sync
+		}
+	}
+)
+
+---- Queues & channels ---------------------------------------------------------
+
+local function prefork()
+	error("channel pipe cannot be used before fork", 2)
+end
+
+local function channel_template(chan)
+	return load(string.format([[
+		local write = ...
+		return function(x)
+			return write(x, %d)
+		end
+	]], chan))(prefork)
+end
+
+local function dispatch_channel(dispatch, recv)
+	local chanid = #dispatch+1
+	local chan = {
+		send = channel_template(chanid),
+		recv = recv
+	}
+	dispatch[chanid] = chan
+	return chan
+end
+
+local function dispatch_torecv(dispatch)
+	local disp = table.new(#dispatch, 0)
+	for id, chan in ipairs(dispatch) do
+		disp[id] = chan.recv
+	end
+	table.clear(dispatch)
+	return disp
+end
+
+local function dispatch_tosend(dispatch, send)
+	for _, chan in ipairs(dispatch) do
+		debug.setupvalue(chan.send, 1, send)
+	end
+	table.clear(dispatch)
+end
+
+local dispatch_mt = {
+	__index = {
+		channel = dispatch_channel,
+		torecv  = dispatch_torecv,
+		tosend  = dispatch_tosend
+	}
+}
+
+local function dispatch()
+	return setmetatable({}, dispatch_mt)
+end
+
+--------------------------------------------------------------------------------
+
 return {
-	encode = encode,
-	decode = decode
+	encode   = encode,
+	decode   = decode,
+	dispatch = dispatch
 }

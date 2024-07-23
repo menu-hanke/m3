@@ -3,7 +3,10 @@ local m3 = require "m3_api"
 local host = {}
 local input = coroutine.wrap(function() coroutine.yield({}) end)
 local driver = {}
-local forest = m3.forest()
+local branch = m3.pipe()
+local tree = m3.pipe()
+local write_branch = m3.write(branch)
+local write_tree = m3.write(tree)
 
 ---- Config environment --------------------------------------------------------
 
@@ -15,18 +18,11 @@ local init         = setmetatable({}, {
 	end
 })
 
-init.read          = init
+init.readfile      = init
 
--- TODO: this should also handle file sinks
-init.connect       = m3.pipe.connect
-
-init.pipe = {
-	new            = m3.pipe.new,
-	shared         = m3.pipe.shared_output,
-	map            = m3.pipe.map,
-	filter         = m3.pipe.filter,
-	tree           = forest
-}
+init.read          = m3.read
+init.write         = m3.write
+init.connect       = m3.connect
 
 init.nothing       = m3.control.nothing
 init.skip          = m3.control.skip
@@ -39,18 +35,32 @@ init.try           = m3.control.try
 init.loop          = m3.control.loop
 init.dynamic       = m3.control.dynamic
 
+init.dataframe     = m3.obj.dataframe
+init.pipe          = m3.obj.pipe
+init.tab           = m3.obj.table
+init.struct        = m3.obj.struct
+init.tree          = m3.obj.tree
+
 init.graph         = m3.fhk.readfile
-init.graphfn       = m3.graphfn
 init.defgraph      = m3.fhk.define
+init.graphfn       = m3.graphfn
 
 -- TODO: this always causes a recompilation, maybe cache the instructions.
 function init.exec(insn)
-	m3.control.exec(m3.control.all { insn, forest.branch })
-	forest.tree()
+	m3.control.exec(m3.control.all { insn, write_branch })
+	write_tree()
 end
 
 function init.input(x) input = x end
 function init.simulate(x) driver = x end
+
+function init.tree()
+	local t = m3.obj.tree()
+	m3.connect(branch, m3.write(t.branch))
+	local pipe = m3.pipe():map(m3.read(t))
+	m3.connect(tree, pipe)
+	return m3.obj.dynamic { write = t, connect = pipe }
+end
 
 ---- Test driver ---------------------------------------------------------------
 
@@ -153,41 +163,37 @@ end
 -- eg. inputs that are only referenced from this should not be saved in memory etc.
 local initfn = m3.graphfn "init"
 
-local inputdef = m3.effect(function()
+host.work = m3.effect(function()
 	local input = loadinput()
 	if input.next and not input.read then
 		input.read = m3.write(m3.data())
 	end
-	return input
-end):once()
-
-function host.on_data()
-	local input = inputdef.value
 	local driver = loaddriver()
 	host.shutdown = input.close
 	if input.next then
 		local inputnext = input.next
 		local inputread = input.read
-		local inpipe = m3.pipe.shared_input()
-		host.work = function()
-			local v = inputnext()
-			if v == nil then return false end
-			inpipe(v)
-		end
-		m3.pipe.connect(inpipe, function(v)
+		local inpipe = m3.obj.shared_input()
+		local writeinput = m3.write(inpipe)
+		m3.connect(inpipe, function(v)
 			inputread(v)
 			initfn()
 			return driver()
 		end)
+		return function()
+			local v = inputnext()
+			if v == nil then return false end
+			writeinput(v)
+		end
 	else
 		local inputread = assert(input.read, "input must define at least one of `next' or `read'")
-		host.work = function()
+		return function()
 			if inputread() == false then return end
 			initfn()
 			return driver()
 		end
 	end
-end
+end):once()
 
 --------------------------------------------------------------------------------
 

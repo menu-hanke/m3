@@ -51,6 +51,14 @@ local function iseffect(x)
 	return getmetatable(x) == effect_mt
 end
 
+local function unwrap(x)
+	if iseffect(x) then
+		return x.value
+	else
+		return x
+	end
+end
+
 local function set(tab, k, v)
 	if tab[k] ~= v then
 		change()
@@ -82,6 +90,7 @@ return {
 	change   = change,
 	effect   = effect,
 	iseffect = iseffect,
+	unwrap   = unwrap,
 	set      = set,
 	proxy    = proxy,
 	startup  = startup

@@ -1,3 +1,5 @@
+local cdata = require "m3_cdata"
+
 local objs = {}
 
 local function parse(x)
@@ -8,8 +10,6 @@ local function parse(x)
 		return x
 	end
 end
-
-local index
 
 local function data(name, obj)
 	if not name then return objs end
@@ -24,15 +24,36 @@ local function data(name, obj)
 	else
 		obj = objs[container]
 		if field then
-			obj = index(obj, field)
+			obj = obj[field]
 		end
 	end
 	return obj
 end
 
+local function triples()
+	return coroutine.wrap(function()
+		for name, container in pairs(objs) do
+			if type(name) == "string" then
+				for field, desc in pairs(container) do
+					if type(field) == "string" then
+						coroutine.yield(name, field, desc)
+					end
+				end
+			end
+		end
+	end)
+end
+
 local function meta(x)
 	local mt = getmetatable(x)
-	return mt and mt["m3$meta"]
+	if mt then
+		local data = mt.data
+		if data == true then
+			return x
+		elseif data then
+			return meta(data) or data
+		end
+	end
 end
 
 local function todata(x)
@@ -42,44 +63,32 @@ local function todata(x)
 	return x
 end
 
-local function desc(x)
-	x = todata(x)
-	local m = meta(x)
-	if not m then return end
-	while m.descriptor do
-		local desc = m.descriptor
-		if desc then
-			if type(desc) == "function" then
-				desc = desc(x)
-			end
-			x = desc
-			m = meta(x)
-		end
-	end
-	return x, m
-end
-
-index = function (obj, key)
-	obj = todata(obj)
-	local desc, meta = desc(obj)
-	return meta.index(desc, key)
-end
-
 local function typeof(x)
-	local _, meta = desc(todata(x))
+	local meta = meta(todata(x))
 	return meta and meta.type
 end
 
-local function dpairs(x)
-	local desc, meta = desc(x)
-	return meta.pairs(desc)
+local function ctype(x)
+	x = todata(x)
+	if x.ctype then return x.ctype end
+	local meta = meta(x)
+	return meta and meta.ctype(x)
+end
+
+local function dummy(x)
+	x = todata(x)
+	if x.dummy then return x.dummy end
+	local meta = meta(x)
+	if meta and meta.dummy then return meta.dummy end
+	local ctype = ctype(x)
+	return ctype and cdata.dummy(ctype)
 end
 
 return {
-	data   = data,
-	meta   = meta,
-	desc   = desc,
-	typeof = typeof,
-	index  = index,
-	pairs  = dpairs
+	data    = data,
+	triples = triples,
+	meta    = meta,
+	typeof  = typeof,
+	ctype   = ctype,
+	dummy   = dummy
 }

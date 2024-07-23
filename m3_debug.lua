@@ -1,7 +1,6 @@
-local hook = require "m3_hook"
-local mem = require "m3_mem"
-local pipe = require "m3_pipe"
-local state = require "m3_state"
+local access = require "m3_access"
+local environment = require "m3_environment"
+local event = require "m3_event"
 local ffi = require "ffi"
 local buffer = require "string.buffer"
 
@@ -25,7 +24,7 @@ local function trace_plain(s)
 end
 
 local trace
-if state.mode == "mp" then
+if environment.mode == "mp" then
 	if colorterm then
 		trace = function(s)
 			local id = C.m3__mp_proc_id
@@ -46,27 +45,6 @@ if state.mode == "mp" then
 	end
 else
 	trace = trace_plain
-end
-
----- trace messages ------------------------------------------------------------
-
-local memstate = mem.state
-local memptr = tonumber(ffi.cast("intptr_t", ffi.cast("void *", memstate)))
-
-local function trace_save()
-	trace(string.format("SAVE  0x%x (%d bytes)", memstate.fbase-memptr, memptr-memstate.v.cursor))
-end
-
-local function trace_load()
-	trace(string.format("LOAD  0x%x", memstate.fbase-memptr))
-end
-
-local function traceon(flags)
-	flags = flags or "s"
-	if flags:match("s") then
-		pipe.connect(hook.mem_save, trace_save)
-		pipe.connect(hook.mem_load, trace_load)
-	end
 end
 
 ---- pretty printing -----------------------------------------------------------
@@ -117,9 +95,6 @@ local function putpp(x, buf, indent, fmt, rec)
 		-- it may contain embedded quotes but that's fine,
 		-- we're not trying to be perfect here.
 		putcolor(buf, string.format('"%s"', x), "string")
-	elseif pipe.ispipe(x) then
-		-- TODO: pipe flags + connections
-		buf:putf("<pipe %s>", x)
 	elseif type(x) == "table" then
 		if rec[x] then
 			putcolor(buf, string.format("<recursive table reference %s>", x), "recursive")
@@ -204,11 +179,11 @@ local function pretty(x, flags)
 	return tostring(buf)
 end
 
-local function pprint(...)
-	local n = select("#", ...)
-	local fmt = flags2fmt(n > 1 and "s" or "sni")
+local function vpretty(flags, sep, ...)
 	local buf = buffer.new()
-	for i=1, n do
+	local fmt = flags2fmt(flags)
+	for i=1, select("#", ...) do
+		if i > 1 and sep then buf:put(sep) end
 		local x = select(i, ...)
 		-- special case: top-level strings are printed as-is
 		if type(x) == "string" then
@@ -217,7 +192,108 @@ local function pprint(...)
 			putpp(select(i, ...), buf, "", fmt, {})
 		end
 	end
-	trace(buf)
+	return buf
+end
+
+local function pprint(...)
+	trace(vpretty(select("#", ...) > 1 and "s" or "sni", "\t", ...))
+end
+
+---- trace messages ------------------------------------------------------------
+
+local function trace_off() end
+
+local function trace_heap(slots)
+	table.sort(slots, function(a,b)
+		return ffi.cast("intptr_t", a.ptr or 0) < ffi.cast("intptr_t", b.ptr or 0)
+	end)
+	for _,slot in ipairs(slots) do
+		if slot.block then
+			trace(string.format(
+				"%02d.0x%x..+%-3d %s",
+				slot.block,
+				ffi.cast("intptr_t", slot.ptr),
+				ffi.sizeof(slot.ctype),
+				slot.ctype
+			))
+		elseif slot.ptr then
+			local acs = access.get(slot)
+			if acs == "r" then acs = "r-"
+			elseif acs == "w" then acs = "-w"
+			else acs = "--" end
+			trace(string.format(
+				"%s.0x%x..+%-3d %s",
+				acs,
+				ffi.cast("intptr_t", slot.ptr),
+				ffi.sizeof(slot.ctype),
+				slot.ctype
+			))
+		end
+	end
+end
+
+local function trace_save(fp)
+	trace(string.format("SAVE  0x%x", -fp))
+end
+
+local function trace_load(fp)
+	trace(string.format("LOAD  0x%x", -fp))
+end
+
+local function caller(level)
+	local info = debug.getinfo(level, "Sl")
+	return string.format("%s:%d", info.short_src, info.currentline)
+end
+
+local function trace_read(...)
+	-- NOTE: caller level here (and trace_write) depends on the wrappers in access
+	trace(string.format("READ  %s -> %s", caller(4), vpretty("", "\t", ...)))
+end
+
+local function trace_write(...)
+	trace(string.format("WRITE %s -> %s", caller(4), vpretty("", "\t", ...)))
+end
+
+local function mask2str(mask)
+	local idx = {}
+	for i=0, 63 do
+		if bit.band(mask, bit.lshift(1ull, i)) ~= 0 then
+			table.insert(idx, i)
+		end
+	end
+	return table.concat(idx, ",")
+end
+
+local function trace_mask(mask)
+	trace(string.format("MASK  {%s}", mask2str(mask)))
+end
+
+local trace_events = {
+	heap  = { flags="h", func=trace_heap },
+	save  = { flags="s", func=trace_save },
+	load  = { flags="s", func=trace_load },
+	mask  = { flags="s", func=trace_mask },
+	read  = { flags="a", func=trace_read },
+	write = { flags="a", func=trace_write }
+}
+
+-- trace flags:
+--   a    access
+--   h    heap layout
+--   s    save points
+local function traceon(flags)
+	flags = flags or "ahs"
+	local events = setmetatable({}, {__index=function() return trace_off end})
+	for event,def in pairs(trace_events) do
+		if flags:match(def.flags) then
+			events[event] = def.func
+		end
+	end
+	local ct = ffi.metatype("struct {}", {__index=events})
+	event.listener(load([[
+		local ct = ...
+		return function(event, ...) return ct[event](...) end
+	]])(ct))
 end
 
 --------------------------------------------------------------------------------

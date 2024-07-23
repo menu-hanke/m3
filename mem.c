@@ -1,261 +1,262 @@
 #include "def.h"
 #include "target.h"
 
-#include <assert.h>
-#include <stdalign.h>
-#include <stddef.h>
-#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
-#if M3_x86
-#include <x86intrin.h>
-#endif
+/* ---- Virtual memory ------------------------------------------------------ */
 
-#ifdef __AVX__
-#define MEM_ALIGN_COPY 32
-#define MEM_SIMD       1
-#elifdef __SSE__
-#define MEM_ALIGN_COPY 16
-#define MEM_SIMD       1
-#else
-#define MEM_ALIGN_COPY 1
-#define MEM_SIMD       0
-#endif
+#if M3_LINUX
 
-/* must match mem_fastcpy & mem_fastzero */
-#if MEM_SIMD
-#define MEM_EXTRA      63
-#else
-#define MEM_EXTRA      0
-#endif
+#include <sys/mman.h>
 
-#if M3_SP64
-CDEF typedef int64_t m3_Savepoint;
-#else
-CDEF typedef int32_t m3_Savepoint;
-#endif
-
-// NOTE: use a signed `intptr_t` here: bit.band(p, -mask) = 0 if p is unsigned.
-CDEF typedef struct m3_RegionState {
-	intptr_t cursor;         // smallest allocated address
-#if M3_WINDOWS
-	intptr_t commit;         // smallest committed address
-#endif
-} m3_RegionState;
-
-/*
- * [ vstack memory ] . [ frame memory ]
- *                   ^
- *                   |
- *                   m3_MemState *
- */
-CDEF typedef struct m3_MemState {
-	m3_RegionState v;        // vstack
-	m3_RegionState f;        // frame
-	m3_RegionState x;        // scratch memory
-	intptr_t fbase;          // current frame start
-} m3_MemState;
-
-#define MEM_ALIGN_SP   MAX(MEM_ALIGN_COPY, alignof(m3_Savepoint))
-
-/* ---- Memory copies ------------------------------------------------------- */
-
-/*
- * backwards overwriting memcpy.
- * NOTE: always check the assembly of m3__save/m3__load if you modify this function.
- */
-AINLINE
-static void mem_fastcpy_inline(void *dst, void *src, void *dstend)
+CDEFFUNC void *m3__mem_map_shared(size_t size)
 {
-#ifdef __AVX__
-	do {
-		__m256 ymm0 = _mm256_loadu_ps(src-32);
-		__m256 ymm1 = _mm256_loadu_ps(src-64);
-		_mm256_storeu_ps(dst-32, ymm0);
-		_mm256_storeu_ps(dst-64, ymm1);
-		dst -= 64;
-		src -= 64;
-	} while((intptr_t)dst > (intptr_t)dstend);
-#elifdef __SSE__
-	do {
-		__m128 xmm0 = _mm_loadu_ps(src-16);
-		__m128 xmm1 = _mm_loadu_ps(src-32);
-		_mm_storeu_ps(dst-16, xmm0);
-		_mm_storeu_ps(dst-32, xmm1);
-		__m128 xmm2 = _mm_loadu_ps(src-48);
-		__m128 xmm3 = _mm_loadu_ps(src-64);
-		_mm_storeu_ps(dst-48, xmm2);
-		_mm_storeu_ps(dst-64, xmm3);
-		dst -= 64;
-		src -= 64;
-	} while((intptr_t)dst > (intptr_t)dstend);
-#else
-	size_t size = (intptr_t)dst - (intptr_t)dstend;
-	memcpy(dstend, src-size, size);
-#endif
+	return mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);
 }
 
-static void mem_fastcpy(void *dst, void *src, void *dstend)
+CDEFFUNC void *m3__mem_map_stack(size_t size)
 {
-	mem_fastcpy_inline(dst, src, dstend);
+	void *map = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,
+		-1, 0);
+	madvise(map, size, MADV_DONTDUMP);
+	return map;
 }
 
-static void mem_fastcpyAA(void *dst, void *src, void *dstend)
+CDEFFUNC void m3__mem_unmap(void *base, size_t size)
 {
-	mem_fastcpy_inline(
-			__builtin_assume_aligned(dst, MEM_ALIGN_COPY),
-			__builtin_assume_aligned(src, MEM_ALIGN_COPY),
-			dstend
-	);
+	munmap(base, size);
 }
 
-/* backwards overwriting memset to zero */
-static void mem_fastzero(void *ptr, void *end)
-{
-#ifdef __AVX__
-	__m256 ymm0 = _mm256_setzero_ps();
-	do {
-		_mm256_storeu_ps(ptr-32, ymm0);
-		_mm256_storeu_ps(ptr-64, ymm0);
-		ptr -= 64;
-	} while((intptr_t)ptr > (intptr_t)end);
-#elifdef __SSE__
-	__m128 xmm0 = _mm_setzero_ps();
-	do {
-		_mm_storeu_ps(ptr-16, xmm0);
-		_mm_storeu_ps(ptr-32, xmm0);
-		_mm_storeu_ps(ptr-48, xmm0);
-		_mm_storeu_ps(ptr-64, xmm0);
-		ptr -= 64;
-	} while((intptr_t)ptr > (intptr_t)end);
-#else
-	memset(end, 0, (intptr_t)ptr - (intptr_t)end);
 #endif
+
+/* ---- Stack/arena allocation ---------------------------------------------- */
+
+CDEF typedef struct m3_Stack {
+	intptr_t cursor;
+	intptr_t base;
+	intptr_t top;
+#if M3_VIRTUALALLOC
+	intptr_t bottom;
+#endif
+} m3_Stack;
+
+AINLINE static void mem_align(m3_Stack *stack, size_t align)
+{
+	stack->cursor &= -align;
 }
 
-/* ---- Memory (re-)allocation ---------------------------------------------- */
-
-CDEFFUNC void *m3__mem_realloc(m3_RegionState *reg, uintptr_t base, void *src,
-	size_t oldsize, size_t newsize, size_t align)
+AINLINE static void mem_bump(m3_Stack *stack, size_t size)
 {
-	uintptr_t p = reg->cursor;
-	p -= newsize;
-	p &= -align;
-	if (UNLIKELY(p < base))
-		return NULL;
-	reg->cursor = p;
-	mem_fastcpy((void *) (p+oldsize), src+oldsize, (void *) p);
-	return (void *) p;
+	stack->cursor -= size;
 }
 
-CDEFFUNC uint32_t *m3__mem_skiplist_build(uint32_t *tx, size_t nskip, size_t num)
+AINLINE static int mem_check(m3_Stack *stack)
 {
-	assert(nskip > 0);
-	uint64_t *bitmap = (uint64_t *) (((intptr_t)tx - ((num+63)>>3)) & -8);
-	mem_fastzero(tx, bitmap);
-	size_t i = 0;
-	do {
-		uint32_t idx = *tx++;
-		bitmap[idx>>6] |= 1ULL << (idx & 63);
-	} while(++i < nskip);
-	uint32_t *iv = (uint32_t *) bitmap;
-	*--iv = 0;
-	uint64_t c = 0;
-	uint64_t off = 0;
-	uint32_t nsk = 0;
-	do {
-		uint64_t w = *bitmap++;
-		nsk += __builtin_popcountll(w);
-		uint64_t s = (int64_t)w < 0;
-		w ^= w << 1;
-		w ^= c;
-		c = s;
-		while(w) {
-			*--iv = off + __builtin_ctzll(w);
-			w &= w-1;
-		}
-		off += 64;
-	} while(off < num);
-	if(UNLIKELY(c || *iv >= num))
-		iv++;
-	else
-		*--iv = num;
-	*--iv = num-nsk;
-	return iv;
-}
-
-CDEFFUNC void *m3__mem_skiplist_realloc(m3_MemState *mem, void *src,
-		size_t elsize, size_t num, size_t align, uint32_t *iv)
-{
-	uint32_t ncp = *iv++;
-	intptr_t p = mem->f.cursor;
-	p -= num*elsize;
-	p &= -align;
-	if (UNLIKELY(p < (intptr_t)(mem+1)))
-		return NULL;
-	mem->f.cursor = p;
-	void *d = (void*)p + ncp*elsize;
-	for(;;) {
-		uint32_t end = *iv++;
-		if(!end) break;
-		uint32_t start = *iv++;
-		size_t size = (end-start)*elsize;
-		mem_fastcpy(d, src+end*elsize, d-size);
-		if(!start) break;
-		d -= size;
+	if (UNLIKELY(stack->cursor < stack->base)) {
+#if M3_VIRTUALALLOC
+#error "TODO"
+#endif
+		return 1;
+	} else {
+		return 0;
 	}
-	return (void *) p;
 }
 
-/* ---- External allocator -------------------------------------------------- */
-
-CDEFFUNC void* m3__mem_extalloc(m3_RegionState *reg, size_t size, size_t align)
+CDEFFUNC void *m3__mem_extalloc(m3_Stack *stack, size_t size, size_t align)
 {
-	intptr_t p = reg->cursor;
-	p -= size;
-	p &= -align;
-	// TODO: check if p is still in the region here.
-	// (can include base in the userdata struct etc.
-	//  or use guard pages.
-	//  or compute it from the address.)
-	reg->cursor = p;
-	return (void *) p;
+	intptr_t p = stack->cursor;
+	mem_bump(stack, size);
+	mem_align(stack, align);
+	if (UNLIKELY(mem_check(stack))) {
+		stack->cursor = p;
+		return NULL;
+	} else {
+		return (void *) stack->cursor;
+	}
 }
 
 /* ---- Savepoint handling -------------------------------------------------- */
 
-CDEFFUNC m3_Savepoint m3__save(m3_MemState *mem)
+/*
+ * Stack layout:
+ *
+ *                 +----------------------+       ss->base
+ *--------+        |                      |          |
+ *        |        v                      |          v
+ *-----+--|---+------+-----------+-----+--|---+------+-----------+-----+
+ * ... | link | mask | heap save | ... | link | mask | heap save | ... |
+ *-----+------+------+-----------+-----+------+------+-----------+-----+
+ *                   ^                               ^                 ^
+ *                   |                               |                 |
+ *                savepoint                       savepoint           stack
+ *
+ * each mask lists CLEAN blocks, ie. a bit corresponding to a heap block is SET
+ * if the block is NOT written, and UNSET if the block IS written.
+ *
+ */
+
+// maximum number of blocks (1-64)
+#define MEM_HEAPBMAX 64
+
+// minimum block size (power of 2)
+#define MEM_BSIZEMIN 64
+
+LUADEF(cdef.M3_MEM_HEAPBMAX = MEM_HEAPBMAX);
+LUADEF(cdef.M3_MEM_BSIZEMIN = MEM_BSIZEMIN);
+
+CDEF typedef struct m3_SaveState {
+	void *heap;
+	intptr_t base;
+	uint64_t mask; // same as *((uint64_t *)base-1)
+	uint32_t blocksize;
+	m3_Stack stack;
+} m3_SaveState;
+
+static void mem_copyblock(void *dst, void *src, void *end)
 {
-	intptr_t f = mem->f.cursor;
-	intptr_t v = mem->v.cursor;
-	f -= sizeof(m3_Savepoint);
-	f &= -MEM_ALIGN_SP;
-	intptr_t ofs = (intptr_t)mem - (intptr_t)v;
-	intptr_t fofs = f - ofs;
-	if (UNLIKELY(fofs < (intptr_t)(mem+1)+64)) {
-		// TODO: set error
-		return -1;
-	}
-	*(m3_Savepoint *)f = M3_SP64 ? v : ofs;
-	mem->f.cursor = fofs;
-	mem->fbase = fofs;
-	mem_fastcpyAA((void *) f, mem, (void *) fofs);
-	return M3_SP64 ? f : (f - (intptr_t)mem);
+	do {
+		memcpy(dst, src, MEM_BSIZEMIN);
+		dst += MEM_BSIZEMIN;
+		src += MEM_BSIZEMIN;
+	} while (src < end);
 }
 
-CDEFFUNC void m3__load(m3_MemState *mem, m3_Savepoint sp)
+CDEFFUNC void m3__mem_setmask(m3_SaveState *ss, uint64_t mask)
 {
-#if M3_SP64
-	intptr_t f = sp;
-	intptr_t v = *(m3_Savepoint *)f;
-	intptr_t ofs = (intptr_t)exec - v;
-#else
-	intptr_t f = (intptr_t)mem + sp;
-	intptr_t ofs = *(m3_Savepoint *)f;
-	intptr_t v = (intptr_t)mem - ofs;
-#endif
-	intptr_t fofs = f - ofs;
-	mem->v.cursor = v;
-	mem->f.cursor = fofs;
-	mem->fbase = fofs;
-	mem_fastcpyAA(mem, (void *)f, (void *)v);
+	void *heap = ss->heap;
+	void *base = (void *) ss->base;
+	ptrdiff_t blocksize = ss->blocksize;
+	ss->mask &= ~mask;
+	for (;;) {
+		uint64_t fmask = *((uint64_t *)base-1);
+		uint64_t need = fmask & mask;
+		if (!need) return;
+		*((uint64_t *)base-1) &= ~mask;
+		do {
+			ptrdiff_t idx = __builtin_ctzll(need);
+			need &= need-1;
+			ptrdiff_t ofs = idx*blocksize;
+			mem_copyblock(base + ofs, heap + ofs, heap + ofs + blocksize);
+		} while(need);
+		base = *((void **)base-2);
+	}
+}
+
+CDEFFUNC void m3__mem_load(m3_SaveState *ss, intptr_t base)
+{
+	ss->base = base;
+	ss->stack.cursor = (intptr_t)base-16;
+	uint64_t mask = *((uint64_t *)base-1);
+	ss->mask = mask;
+	ptrdiff_t blocksize = ss->blocksize;
+	void *heap = ss->heap;
+	mask = ~mask;
+	while (mask) {
+		ptrdiff_t idx = __builtin_ctzll(mask);
+		mask &= mask-1;
+		ptrdiff_t ofs = idx*blocksize;
+		mem_copyblock(heap + ofs, (void *)base + ofs, (void *)base + ofs + blocksize);
+	}
+}
+
+/* ---- Vector manipulation ------------------------------------------------- */
+
+// keep in sync with m3_array.lua
+typedef struct {
+	uint32_t ofs;
+	uint32_t num;
+} CopySpan;
+
+CDEFFUNC int32_t m3__mem_buildcopylist(m3_Stack *stack, size_t num)
+{
+	uint64_t *bitmap = (uint64_t *) stack->cursor;
+	// mark one past end as skip so that the tail is also handled by the loop
+	bitmap[num>>6] |= 1ULL << (num & 0x3f);
+	uint32_t start = 0;
+	uint32_t newnum = 0;
+	for (uint32_t base=0; base<num; base+=64) {
+		uint64_t word = *bitmap++;
+		uint32_t ofs = base;
+		while (word) {
+			uint32_t bit = __builtin_ctzll(word);
+			if (LIKELY(ofs+bit > start)) {
+				mem_bump(stack, sizeof(CopySpan));
+				if (UNLIKELY(mem_check(stack))) return -1;
+				CopySpan *c = (CopySpan *) stack->cursor;
+				c->ofs = start;
+				c->num = ofs+bit - start;
+				newnum += c->num;
+			}
+			// shift by +1 here so that ~word is guaranteed to be nonzero
+			word >>= bit + 1;
+			uint32_t skip = __builtin_ctzll(~word);
+			ofs += bit+1+skip;
+			start = ofs;
+			word >>= skip;
+		}
+	}
+	return newnum;
+}
+
+CDEF typedef struct m3_DfProto {
+	uint16_t num;
+	uint8_t align;
+	uint8_t size[];
+} m3_DfProto;
+
+// the point of this union is just to ensure that the VLA can fit (at least) one element.
+typedef union {
+	uint32_t u32;
+	m3_DfProto proto;
+} DfProto1;
+
+// keep in sync with m3_array.lua
+typedef struct {
+	uint32_t num;
+	uint32_t cap;
+	void *col[];
+} DfData;
+
+CDEFFUNC int m3__mem_copy_list(
+	m3_Stack *stack,
+	intptr_t clist,
+	size_t ncopy,
+	m3_DfProto *proto,
+	LUAVOID(DfData) *data
+) {
+	mem_align(stack, proto->align);
+	size_t num = proto->num;
+	CopySpan *cs = (CopySpan *) clist + ncopy;
+	size_t cap = data->cap;
+	for (size_t i=0; i<num; i++) {
+		size_t size = proto->size[i];
+		mem_bump(stack, cap*size);
+		if (UNLIKELY(mem_check(stack)))
+			return -1;
+		void *dt = data->col[i];
+		void *ptr = (void *) stack->cursor;
+		data->col[i] = ptr;
+		for (ssize_t j=-1; j>=-(ssize_t)ncopy; j--) {
+			size_t n = size*cs[j].num;
+			memcpy(ptr, dt + size*cs[j].ofs, n);
+			ptr += n;
+		}
+	}
+	return 0;
+}
+
+CDEFFUNC int m3__mem_copy_list1(
+	m3_Stack *stack,
+	intptr_t clist,
+	size_t ncopy,
+	size_t size,
+	size_t align,
+	LUAVOID(DfData) *data
+) {
+	DfProto1 p;
+	p.proto.num = 1;
+	p.proto.align = align;
+	p.proto.size[0] = size;
+	return m3__mem_copy_list(stack, clist, ncopy, &p.proto, data);
 }

@@ -202,7 +202,11 @@ CDEFFUNC int32_t m3__mem_buildcopylist(m3_Stack *stack, size_t num)
 CDEF typedef struct m3_DfProto {
 	uint16_t num;
 	uint8_t align;
+#if M3_LUADEF
+	uint8_t size[?];
+#else
 	uint8_t size[];
+#endif
 } m3_DfProto;
 
 // the point of this union is just to ensure that the VLA can fit (at least) one element.

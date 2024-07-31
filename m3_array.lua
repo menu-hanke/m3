@@ -515,7 +515,11 @@ local function df_cproto(proto)
 	for _,col in ipairs(proto) do
 		table.insert(size, sizeof(col.ctype))
 	end
-	return ffi.new("m3_DfProto", {#proto, proto[1] and ffi.alignof(proto[1].ctype) or 0, size})
+	return ffi.new("m3_DfProto", #size, {
+		num   = #proto,
+		align = proto[1] and ffi.alignof(proto[1].ctype) or 0,
+		size  = size
+	})
 end
 
 local function df_of(proto)

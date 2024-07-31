@@ -68,9 +68,13 @@ local function col_new(df, name)
 end
 
 local function df_index(df, name)
-	name = cdata.ident(name)
-	local col = col_new(df, name)
-	df[name] = col
+	local cname = cdata.ident(name)
+	if name ~= cname then
+		local col = rawget(df, cname)
+		if col then return col end
+	end
+	local col = col_new(df, cname)
+	df[cname] = col
 	return col
 end
 

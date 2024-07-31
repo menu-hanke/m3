@@ -147,3 +147,8 @@ test("dataframe:clear", function()
 		checkv(ready(), {0,-1,-2,-3,-4,-5,-6,-7,-9})
 	end)
 end)
+
+test("dataframe:fancy-name", function()
+	local df = m3.dataframe()
+	assert(df["a{x}"] == df["a{x}"])
+end)

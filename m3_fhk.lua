@@ -186,12 +186,19 @@ end
 -- otherwise return true.
 local function graph_isexpr(graph, x)
 	local ok, id = pcall(graph.G.getv, graph.G, x)
-	-- ok     id       #back
-	-- false                   not a variable -> expression
-	-- true   nil              undefined variable -> NOT an expression
-	-- true   non-nil  0       undefined variable -> NOT an expression
-	-- true   non-nil  >0      defined variable -> expression
-	return (not ok) or (id and #graph.G:back(id) > 0)
+	if (not ok) or (id and #graph.G:back(id) > 0) then
+		-- either the parse failed, or it's a variable with defined models
+		return true
+	end
+	-- it's syntactically a valid variable, but it has no models.
+	-- check if it has a corresponding default.
+	-- TODO(fhk): add an fhk.split(name) function - this match doesn't work when the table name
+	-- contains a `#`.
+	local tab, col = x:match("^([^#]+)#(.+)$")
+	local ok, id = pcall(graph.G.getv, graph.G, string.format("%s#default{%s}", tab, col))
+	-- if the default exists, then the original is an expression, otherwise the it can be
+	-- forwarded to data.
+	return ok and id
 end
 
 local function graph_mapping(graph, desc)
@@ -252,7 +259,7 @@ local function definedummy(buf, desc, info)
 		))
 	end
 	if dummy ~= dummy then
-		buf:putf("model(%s) is.dummy{%s} = isnan(%s)\n", tab, col, col)
+		buf:putf("model(%s) is.dummy{%s} = isnan(data{%s})\n", tab, col, col)
 	else
 		if type(dummy) == "cdata" then
 			dummy = string.format("0x%x", dummy)

@@ -24,7 +24,7 @@ local function col_map_(col, tab, name)
 		tab,
 		name,
 		fhk.typesuffix(col.ctype),
-		ffi.cast("intptr_t", slot.ptr) + ffi.offsetof(slot.ctype, cdata.ident(name)),
+		ffi.cast("intptr_t", slot.ptr) + ffi.offsetof(slot.ctype, col.name),
 		ffi.cast("intptr_t", slot.ptr) + ffi.offsetof(slot.ctype, "num")
 	)
 end

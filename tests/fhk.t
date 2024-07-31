@@ -114,3 +114,18 @@ test("fhk:graphfn", function()
 		assert(readx() == 2)
 	end)
 end)
+
+test("fhk:default", function()
+	defgraph [[
+		model(df) default{x} = 1
+		model(df) default{y} = x+1
+	]]
+	input {{ df = {{x=100}, {}} }}
+	m3.data("df", m3.dataframe())
+	local r = m3.read("df#x", "df#y")
+	simulate(function()
+		local x, y = r()
+		assert(x[0] == 100 and x[1] == 1)
+		assert(y[0] == 101 and y[1] == 2)
+	end)
+end)

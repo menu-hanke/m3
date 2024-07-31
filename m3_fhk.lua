@@ -114,31 +114,43 @@ local function graph_relation(graph, from, to)
 	return rel
 end
 
+local function graph_analysis_leaf(graph, id)
+	local node = graph_node(graph, id)
+	local tab = graph_node(graph, node.table).name
+	local desc
+	if node.flags.tab then
+		desc = data.data(node.name)
+	elseif node.name:sub(1,1) == "@" then
+		local target = node.name:sub(3,-2)
+		local inverse = graph.G:getv(string.format("%s#@{%s}", target, tab))
+		if inverse and #graph.G:back(inverse) > 0 then
+			-- inverse is defined, fhk will invert for us
+			return false
+		end
+		desc = graph_relation(graph, tab, target)
+	else
+		desc = data.data(tab)[node.name]
+	end
+	effect.change()
+	graph_newdata(graph, id, desc)
+	graph_analysis_visitgfn(graph, tab, node.name, desc)
+	return true
+end
+
 local function graph_analysis_visit(graph, id)
 	local ty = fhk.typeof(id)
 	local back = graph.G:back(id)
-	local node = graph_node(graph, id)
 	if #back == 0 and ty == "var" then
-		local tab = graph_node(graph, node.table).name
-		local desc
-		if node.flags.tab then
-			desc = data.data(node.name)
-		elseif node.name:sub(1,1) == "@" then
-			desc = graph_relation(graph, tab, node.name:sub(3,-2))
-		else
-			desc = data.data(tab)[node.name]
-		end
-		effect.change()
-		graph_newdata(graph, id, desc)
-		graph_analysis_visitgfn(graph, tab, node.name, desc)
-	else
-		local ety
-		if ty == "var" then ety = "model" else ety = "var" end
-		for _,e in ipairs(back) do
-			graph_analysis_check(graph, e[ety])
+		if graph_analysis_leaf(graph, id) then
+			return
 		end
 	end
-	graph_analysis_check(graph, node.table)
+	local ety
+	if ty == "var" then ety = "model" else ety = "var" end
+	for _,e in ipairs(back) do
+		graph_analysis_check(graph, e[ety])
+	end
+	graph_analysis_check(graph, graph_node(graph, id).table)
 end
 
 graph_analysis_check = function(graph, id)

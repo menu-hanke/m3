@@ -88,6 +88,7 @@ return {
 	data    = data,
 	triples = triples,
 	meta    = meta,
+	todata  = todata,
 	typeof  = typeof,
 	ctype   = ctype,
 	dummy   = dummy

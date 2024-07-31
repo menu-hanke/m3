@@ -16,6 +16,7 @@ m3.data           = data.data
 m3.read           = access.read
 m3.write          = access.write
 m3.connect        = access.connect
+m3.access         = access.get
 m3.cdata          = mem.slot
 m3.graphfn        = function(...) return fhk.graph:fn(...) end
 m3.effect         = effect.effect

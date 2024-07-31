@@ -183,6 +183,7 @@ expand = function(access, x, stmt)
 end
 
 local function get(x)
+	x = data.todata(x)
 	local r = cache.read[x] or getgraph():mapping(x)
 	local w = cache.write[x]
 	if r and w then

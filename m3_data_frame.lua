@@ -8,6 +8,7 @@ local ffi = require "ffi"
 local DF_OBJ = -1
 
 local function col_read(col)
+	access.read(col.df[DF_OBJ])
 	return access.defer(function()
 		return load(string.format([[
 			local df, slice = ...

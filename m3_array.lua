@@ -382,11 +382,6 @@ local function df_clear(df, idx)
 	end
 end
 
-local function df_setrows(df, rows)
-	df_clear(df)
-	df:addrows(rows)
-end
-
 local function df_mutate(df, col, realloc)
 	if realloc or not iswritable(df[col]) then
 		local size = df["m3$size"][col]
@@ -408,15 +403,14 @@ local function df_overwrite(df, col, src)
 	copy(df[col], src)
 end
 
-local function df_setcolsfunc(cols)
+local function df_addcolsfunc(cols)
 	if #cols == 0 then return function() end end
 	local buf = buffer.new()
 	buf:put([[
 		local max = math.max
 		local copyext = ...
-		return function(df, cols)
-			df:clear()
-			local num = max(
+		return function(df, cols, num)
+			num = num or max(
 	]])
 	for i,c in ipairs(cols) do
 		if i>1 then buf:put(",") end
@@ -425,11 +419,11 @@ local function df_setcolsfunc(cols)
 	buf:put(")\n")
 	buf:put([[
 		if num == 0 then return end
-		df:alloc(num)
+		local base = df:alloc(num)
 	]])
 	for _,col in ipairs(cols) do
 		buf:putf(
-			"copyext(df.%s, num, cols.%s, cols.%s and #cols.%s or 0, %s)",
+			"copyext(df.%s+base, num, cols.%s, cols.%s and #cols.%s or 0, %s)",
 			col.name, col.name, col.name, col.name, embedconst(col.dummy)
 		)
 	end
@@ -437,12 +431,17 @@ local function df_setcolsfunc(cols)
 	return assert(load(buf))(copyext)
 end
 
-local function df_settab(df, tab)
-	if #tab > 0 then
-		df_setrows(df, tab)
+local function df_extend(df, tab, num)
+	if num or (tab[1] == nil) then
+		return df:addcols(tab, num)
 	else
-		df:setcols(tab)
+		return df:addrows(tab)
 	end
+end
+
+local function df_settab(df, tab, num)
+	df_clear(df)
+	return df_extend(df, tab, num)
 end
 
 local function df_len(df)
@@ -536,7 +535,7 @@ local function df_of(proto)
 		table.insert(ctarg, col.ctype)
 	end
 	ctdef:put("}")
-	local df_setcols = df_setcolsfunc(proto)
+	local df_addcols = df_addcolsfunc(proto)
 	local df_alloc = df_allocfunc(proto)
 	local df_copyrow = df_copyrowfunc(proto)
 	local df_addrows = df_addrowsfunc()
@@ -546,12 +545,12 @@ local function df_of(proto)
 			["m3$align"]  = align,
 			["m3$cproto"] = df_cproto(proto),
 			["m3$pretty"] = df_pretty,
-			setcols       = df_setcols,
+			addcols       = df_addcols,
 			alloc         = df_alloc,
 			copyrow       = df_copyrow,
 			addrows       = df_addrows,
 			addrow        = df_addrow,
-			setrows       = df_setrows,
+			extend        = df_extend,
 			settab        = df_settab,
 			clear         = df_clear,
 			mutate        = df_mutate,

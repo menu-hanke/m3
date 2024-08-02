@@ -115,6 +115,24 @@ test("fhk:graphfn", function()
 	end)
 end)
 
+test("fhk:graphfn-extend", function()
+	m3.data("df", m3.dataframe())
+	defgraph [[
+		model(global) event{+df} = {..3}
+		model(event{+df}) x = conv(.)
+	]]
+	local event = m3.graphfn("event")
+	local readx = m3.read("df#x")
+	simulate(function()
+		event()
+		local x = readx()
+		assert(x[0] == 0 and x[1] == 1 and x[2] == 2)
+		event()
+		x = readx()
+		assert(x[0] == 0 and x[1] == 1 and x[2] == 2 and x[3] == 0 and x[4] == 1 and x[5] == 2)
+	end)
+end)
+
 test("fhk:default", function()
 	defgraph [[
 		model(df) default{x} = 1

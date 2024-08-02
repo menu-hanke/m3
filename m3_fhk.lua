@@ -20,22 +20,71 @@ end
 
 local graph_analysis_check
 
-local function graph_analysis_visitgfn(graph, tab, col, desc)
-	if graph.gfn_visited[desc] then
-		return
-	end
-	graph.gfn_visited[desc] = true
+local function gfn_visitupdate(graph, tab, col, desc)
 	for name, gfn in pairs(graph.functions) do
 		local vname = string.format("%s#`%s`{%s}", tab, name, col)
 		local var = graph.G:getv(vname)
 		if var then
 			graph_analysis_check(graph, var)
-			table.insert(gfn.original, desc)
+			table.insert(gfn.write, desc)
 			-- TODO: allow specifying fhk var id here?
-			table.insert(gfn.updated, vname)
+			table.insert(gfn.read, vname)
 			effect.change()
 		end
 	end
+end
+
+local graph_analysis_visitgfn
+
+local function gfn_visitadd(graph, tab, col, desc)
+	local ty = data.typeof(desc)
+	if tab == "global" and ty == "dataframe" then
+		for name, gfn in pairs(graph.functions) do
+			local vname = string.format("global#`%s`{+%s}", name, col)
+			local var = graph.G:getv(vname)
+			if var then
+				local add = { num = string.format("size(%s)", vname)}
+				gfn.add[col] = add
+				table.insert(gfn.read, add)
+				table.insert(gfn.write, access.use(
+					access.defer(function()
+						return load([[
+							local df = ...
+							return function(v)
+								return df:extend(v, v.num)
+							end
+						]])(require("m3_data_frame").slot(desc).ptr)
+					end),
+					access.write(desc)
+				))
+				graph_analysis_check(graph, var)
+				effect.change()
+			end
+		end
+	elseif ty == "dataframe.col" then
+		graph_analysis_visitgfn(graph, "global", tab, desc.df)
+		for name, gfn in pairs(graph.functions) do
+			local add = gfn.add[tab]
+			if add then
+				local vname = string.format("`%s`{+%s}#%s", name, tab, col)
+				local var = graph.G:getv(vname)
+				if var then
+					add[desc.name] = vname
+					graph_analysis_check(graph, var)
+					effect.change()
+				end
+			end
+		end
+	end
+end
+
+graph_analysis_visitgfn = function(graph, tab, col, desc)
+	if graph.gfn_visited[desc] then
+		return
+	end
+	graph.gfn_visited[desc] = true
+	gfn_visitupdate(graph, tab, col, desc)
+	gfn_visitadd(graph, tab, col, desc)
 end
 
 local function graph_newdata(graph, id, desc)
@@ -183,11 +232,12 @@ end
 local function graph_fn(graph, name)
 	local gfn = graph.functions[name]
 	if not gfn then
-		local original, updated = {}, {}
+		local write, read = {}, {}
 		gfn = {
-			original = original,
-			updated  = updated,
-			func     = access.forward(access.splat(original), access.splat(updated))
+			write = write,
+			read  = read,
+			add   = {},
+			func  = access.forward(access.splat(write), access.splat(read))
 		}
 		graph.functions[name] = gfn
 	end

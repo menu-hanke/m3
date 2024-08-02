@@ -12,7 +12,10 @@
 
 CDEFFUNC void *m3__mem_map_shared(size_t size)
 {
-	return mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);
+	void *map = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS|MAP_NORESERVE,
+		-1, 0);
+	madvise(map, size, MADV_DONTDUMP);
+	return map;
 }
 
 CDEFFUNC void *m3__mem_map_stack(size_t size)

@@ -1,0 +1,19 @@
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - run: git clone --depth 1 --recurse-submodules --shallow-submodules https://oauth2:${{github.token}}@github.com/menu-hanke/m3 .
+      - run: scripts/release-windows.sh
+        shell: C:\shells\msys2bash.cmd {0}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: m3-*.zip

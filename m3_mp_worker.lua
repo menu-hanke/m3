@@ -3,7 +3,6 @@ assert(require("m3_mp").role == "worker")
 local shm = require "m3_shm"
 shm.proc_startup()
 
-local effect = require "m3_effect"
 local host = require "m3_host"
 local ipc = require "m3_ipc"
 local mem = require "m3_mem"
@@ -70,7 +69,7 @@ local work = host.sync and (function()
 			goto again
 		end
 	end
-end)() or effect.unwrap(host.work)
+end)() or host.work
 
 ---- Output --------------------------------------------------------------------
 

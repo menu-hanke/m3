@@ -2,8 +2,8 @@
 local m3 = require "m3_api"
 
 local restree = tree()
-local result = tab()
-connect(restree, result)
+local result = {}
+connect(restree, function(x) table.insert(result, x) end)
 
 local writeres = write(restree)
 local function put(x)
@@ -26,9 +26,8 @@ local function walk(tree, idx, node)
 	return child
 end
 
-local readres = read(result)
 local function check(root)
-	local tree = assert(readres()[1], "no tree")
+	local tree = assert(result[1], "no tree")
 	local idx = walk(tree, -1, root)
 	assert(idx == tree.committed+1, "wrong tree size")
 end
@@ -98,30 +97,31 @@ test.simulate("control:nothing", function()
 	check { {data=1, {data=2}} }
 end)
 
-test("control:optional", function()
-	local state = m3.cdata("struct { uint32_t bit; uint32_t value; }")
-	local wstate = write(state)
-	local rstate = read(state)
-	local seen = {}
-	local function toggle()
-		local s = wstate()
-		s.value = s.value+2^s.bit
-	end
-	local function nextbit()
-		local s = wstate()
-		s.bit = s.bit + 1
-	end
-	local function setseen() seen[rstate().value] = true end
-	simulate(function()
-		exec(all {
-			optional(toggle), nextbit,
-			optional(toggle), nextbit,
-			optional(toggle), nextbit,
-			setseen
-		})
-		for i=0, 7 do assert(seen[i]) end
-	end)
-end)
+-- TODO: cdata api (?)
+-- test("control:optional", function()
+-- 	local state = m3.cdata("struct { uint32_t bit; uint32_t value; }")
+-- 	local wstate = write(state)
+-- 	local rstate = read(state)
+-- 	local seen = {}
+-- 	local function toggle()
+-- 		local s = wstate()
+-- 		s.value = s.value+2^s.bit
+-- 	end
+-- 	local function nextbit()
+-- 		local s = wstate()
+-- 		s.bit = s.bit + 1
+-- 	end
+-- 	local function setseen() seen[rstate().value] = true end
+-- 	simulate(function()
+-- 		exec(all {
+-- 			optional(toggle), nextbit,
+-- 			optional(toggle), nextbit,
+-- 			optional(toggle), nextbit,
+-- 			setseen
+-- 		})
+-- 		for i=0, 7 do assert(seen[i]) end
+-- 	end)
+-- end)
 
 test.simulate("control:skip", function()
 	exec(any {

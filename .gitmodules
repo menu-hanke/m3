@@ -3,4 +3,4 @@
 	url = https://github.com/LuaJIT/LuaJIT
 [submodule "fhk5"]
 	path = fhk5
-	url = git@github.com:menu-hanke/fhk5.git
+	url = https://github.com/menu-hanke/fhk5

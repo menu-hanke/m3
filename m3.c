@@ -39,7 +39,9 @@ static void help(const char *progname)
 	fputs(
 			"    -O[opt]            Control LuaJIT optimizations.\n"
 			"    -j cmd             Perform LuaJIT control command.\n"
+#if M3_LINUX
 			"    -p num             Control parallelization (default: number of CPUs).\n"
+#endif
 			"    -l module          Load module.\n"
 			"    -i input           Set input.\n"
 			"    -v[flags]          Verbose output.\n"
@@ -53,6 +55,7 @@ static void help(const char *progname)
 
 static void version(void)
 {
+	extern const char *fhk_VERSION;
 	puts(
 			"m3 "
 #ifdef M3_GITVER
@@ -61,17 +64,21 @@ static void version(void)
 			"(unknown version)"
 #endif
 			" ["
-#if M3_WINDOWS
-			" win"
-#endif
 #if M3_LINUX
 			" linux"
+#endif
+#if M3_WINDOWS
+			" windows"
 #endif
 #if M3_MMAP
 			" mmap"
 #endif
+#if M3_VIRTUALALLOC
+			" VirtualAlloc"
+#endif
 			" ]"
 	);
+	printf("fhk %s\n", fhk_VERSION);
 	puts(
 			LUAJIT_VERSION
 #ifdef LJ_GITVER
@@ -120,7 +127,7 @@ help:
 						exit(-1);
 					}
 				}
-				if (f == 'p') {
+				if (M3_LINUX && f == 'p') {
 					init->parallel = strtoul(v, NULL, 10);
 				} else {
 					STRARG(f, v);
@@ -337,6 +344,7 @@ static int setup(lua_State *L)
 		}
 	}
 	lua_getfield(L, 2, "host");
+	lua_call(L, 0, 1);
 	return 1;
 }
 

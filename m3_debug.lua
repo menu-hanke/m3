@@ -1,4 +1,3 @@
-local access = require "m3_access"
 local environment = require "m3_environment"
 local event = require "m3_event"
 local ffi = require "ffi"
@@ -204,32 +203,33 @@ end
 local function trace_off() end
 
 local function trace_heap(slots)
-	table.sort(slots, function(a,b)
-		return ffi.cast("intptr_t", a.ptr or 0) < ffi.cast("intptr_t", b.ptr or 0)
-	end)
-	for _,slot in ipairs(slots) do
-		if slot.block then
-			trace(string.format(
-				"%02d.0x%x..+%-3d %s",
-				slot.block,
-				ffi.cast("intptr_t", slot.ptr),
-				ffi.sizeof(slot.ctype),
-				slot.ctype
-			))
-		elseif slot.ptr then
-			local acs = access.get(slot)
-			if acs == "r" then acs = "r-"
-			elseif acs == "w" then acs = "-w"
-			else acs = "--" end
-			trace(string.format(
-				"%s.0x%x..+%-3d %s",
-				acs,
-				ffi.cast("intptr_t", slot.ptr),
-				ffi.sizeof(slot.ctype),
-				slot.ctype
-			))
-		end
-	end
+	error("TODO")
+-- 	table.sort(slots, function(a,b)
+-- 		return ffi.cast("intptr_t", a.ptr or 0) < ffi.cast("intptr_t", b.ptr or 0)
+-- 	end)
+-- 	for _,slot in ipairs(slots) do
+-- 		if slot.block then
+-- 			trace(string.format(
+-- 				"%02d.0x%x..+%-3d %s",
+-- 				slot.block,
+-- 				ffi.cast("intptr_t", slot.ptr),
+-- 				ffi.sizeof(slot.ctype),
+-- 				slot.ctype
+-- 			))
+-- 		elseif slot.ptr then
+-- 			local acs = access.get(slot)
+-- 			if acs == "r" then acs = "r-"
+-- 			elseif acs == "w" then acs = "-w"
+-- 			else acs = "--" end
+-- 			trace(string.format(
+-- 				"%s.0x%x..+%-3d %s",
+-- 				acs,
+-- 				ffi.cast("intptr_t", slot.ptr),
+-- 				ffi.sizeof(slot.ctype),
+-- 				slot.ctype
+-- 			))
+-- 		end
+-- 	end
 end
 
 local function trace_save(fp)

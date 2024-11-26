@@ -6,7 +6,7 @@
 
 /* ---- Virtual memory ------------------------------------------------------ */
 
-#if M3_LINUX
+#if M3_MMAP
 
 #include <sys/mman.h>
 
@@ -29,6 +29,21 @@ CDEFFUNC void *m3__mem_map_stack(size_t size)
 CDEFFUNC void m3__mem_unmap(void *base, size_t size)
 {
 	munmap(base, size);
+}
+
+#elif M3_VIRTUALALLOC
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+CDEFFUNC void *m3__mem_map_stack(size_t size)
+{
+	return VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_READWRITE);
+}
+
+CDEFFUNC void m3__mem_unmap(void *base)
+{
+	VirtualFree(base, 0, MEM_RELEASE);
 }
 
 #endif
@@ -54,13 +69,32 @@ AINLINE static void mem_bump(m3_Stack *stack, size_t size)
 	stack->cursor -= size;
 }
 
+#if M3_VIRTUALALLOC
+
+COLD
+CDEFFUNC int m3__mem_grow(m3_Stack *stack)
+{
+	if (UNLIKELY(stack->cursor <= stack->bottom))
+		return 1;
+	intptr_t p = stack->cursor;
+	p &= !(M3_PAGE_SIZE - 1);
+	if (UNLIKELY(!VirtualAlloc((LPVOID)p, (size_t)(stack->base - p), MEM_COMMIT, PAGE_READWRITE)))
+		return 1;
+	stack->cursor = p;
+	stack->base = p;
+	return 0;
+}
+
+#endif
+
 AINLINE static int mem_check(m3_Stack *stack)
 {
 	if (UNLIKELY(stack->cursor < stack->base)) {
 #if M3_VIRTUALALLOC
-#error "TODO"
-#endif
+		return m3__mem_grow(stack);
+#else
 		return 1;
+#endif
 	} else {
 		return 0;
 	}

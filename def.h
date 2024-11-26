@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "target.h"
+
 #define LIKELY(x)            __builtin_expect(!!(x), 1)
 #define UNLIKELY(x)          __builtin_expect(!!(x), 0)
 #define AINLINE              __attribute__((always_inline)) inline
@@ -49,3 +51,7 @@ typedef m3_MRef MRef;
 // this is 1ULL<<32, but it must be written in a form that luajit can parse.
 #define VMSIZE_PROC          0x100000000ull
 LUADEF(cdef.M3_VMSIZE_PROC = VMSIZE_PROC)
+
+#if M3_VIRTUALALLOC
+LUADEF(cdef.M3_MEM_VIRTUALALLOC = true)
+#endif

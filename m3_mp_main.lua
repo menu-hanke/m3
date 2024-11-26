@@ -3,7 +3,6 @@ assert(require("m3_mp").role == "main")
 local shm = require "m3_shm"
 shm.proc_startup()
 
-local effect = require "m3_effect"
 local environment = require "m3_environment"
 local host = require "m3_host"
 local ipc = require "m3_ipc"
@@ -83,7 +82,7 @@ end
 
 local main_cycle
 if host.sync then
-	local work = effect.unwrap(host.work)
+	local work = host.work
 	local write_cycle = mp.write_cycle
 	main_cycle = function()
 		nextcycle()

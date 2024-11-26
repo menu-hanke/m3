@@ -9,9 +9,7 @@
 #include <lualib.h>
 #include <lauxlib.h>
 
-#if M3_WINDOWS
-#error "TODO: windows: sys_num_cpus"
-#else
+#if M3_LINUX
 
 #include <sched.h>
 
@@ -28,7 +26,9 @@ static int sys_num_cpus(void)
 
 static void checkopt(m3_Init *opt)
 {
+#if M3_LINUX
 	if (opt->parallel == M3_PARALLEL_NCPU) opt->parallel = sys_num_cpus();
+#endif
 	opt->vmsize = opt->vmsize ? (opt->vmsize & -M3_PAGE_SIZE) : VMSIZE_DEFAULT;
 }
 
@@ -54,12 +54,14 @@ static void pushenv(lua_State *L, m3_Init *opt)
 	lua_setfield(L, -2, "userdata");
 	lua_pushinteger(L, VMSIZE_DEFAULT);
 	lua_setfield(L, -2, "stack");
+#if M3_LINUX
 	if (opt->parallel) {
 		lua_pushinteger(L, opt->parallel);
 		lua_setfield(L, -2, "parallel");
 		lua_pushcfunction(L, m3_mp_fork);
 		lua_setfield(L, -2, "fork");
 	}
+#endif
 }
 
 lua_State *m3_newstate(m3_Init *opt)

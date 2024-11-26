@@ -8,12 +8,15 @@
 
 #if defined(_WIN32) || defined(_CYGWIN)
 #define M3_WINDOWS           1
+#define M3_VIRTUALALLOC      1
 #else
 #define M3_MMAP              1
 #endif
 
 #ifdef __linux__
 #define M3_LINUX             1
+#else
+#define M3_LINUX             0
 #endif
 
 #define M3_CACHELINE_SIZE    64

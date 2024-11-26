@@ -1,4 +1,5 @@
 local mem = require "m3_mem"
+local fhk = require "fhk"
 local ffi = require "ffi"
 local buffer = require "string.buffer"
 require "table.new"
@@ -77,16 +78,26 @@ end
 
 ---- vector copies -------------------------------------------------------------
 
-local isslice_cache = {}
+local direct_cache = {} -- ctypeid -> function
 
-local function isslice(x)
-	local ctid = tonumber(typeof(x))
-	local isc = isslice_cache[ctid]
-	if isc == nil then
-		isc = pcall(function() return x.data, x.num end)
-		isslice_cache[ctid] = isc
+local function tensor_directbuf(x)
+	return x.e
+end
+
+local function directfunc(ct)
+	if fhk.istensor(ct) then return tensor_directbuf end
+	return false
+end
+
+local function direct(x)
+	local f = direct_cache[tonumber(typeof(x))]
+	if f then return f(x) end
+	if f == nil then
+		f = directfunc(typeof(x))
+		direct_cache[tonumber(typeof(x))] = f
+		if f then return f(x) end
 	end
-	return isc
+	return x
 end
 
 -- size of pointed element. carefully tuned so that it compiles to a constant.
@@ -105,22 +116,22 @@ end
 
 local function copy(dst, src, num)
 	if num == nil then num = #src end
-	if type(dst) == "cdata" then
-		if type(src) == "cdata" then
-			local dstp, srcp = dst, src
-			if isslice(dst) then dstp = dst.data end
-			if isslice(src) then srcp = src.data end
-			if typeof(dstp) == typeof(srcp) then
-				ffi_copy(dstp, srcp, num*sizeofp(dstp))
+	if type(src) == "cdata" then
+		src = direct(src)
+		if type(dst) == "cdata" then
+			dst = direct(dst)
+			if typeof(dst) == typeof(src) then
+				return ffi_copy(dst, src, num*sizeofp(dst))
 			else
 				return copy_fallback(dst, src, 0, 0, num)
 			end
 		else
-			return copy_fallback(dst, src, 0, 1, num)
+			return copy_fallback(dst, src, 1, 0, num)
 		end
 	else
-		if type(src) == "cdata" then
-			return copy_fallback(dst, src, 1, 0, num)
+		if type(dst) == "cdata" then
+			dst = direct(dst)
+			return copy_fallback(dst, src, 0, 1, num)
 		else
 			return copy_fallback(dst, src, 1, 1, num)
 		end
@@ -423,7 +434,7 @@ local function df_addcolsfunc(cols)
 	]])
 	for _,col in ipairs(cols) do
 		buf:putf(
-			"copyext(df.%s+base, num, cols.%s, cols.%s and #cols.%s or 0, %s)",
+			"copyext(df.%s+base, num, cols.%s, cols.%s and #cols.%s or 0, %s)\n",
 			col.name, col.name, col.name, col.name, embedconst(col.dummy)
 		)
 	end
@@ -522,7 +533,6 @@ local function df_cproto(proto)
 end
 
 local function df_of(proto)
-	table.sort(proto, function(a, b) return ffi.alignof(a.ctype) > ffi.alignof(b.ctype) end)
 	local size, align = {}, {}
 	local ctdef = buffer.new()
 	local ctarg = {}

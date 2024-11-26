@@ -9,20 +9,9 @@ _G.m3 = require "m3"
 local mode = require("m3_"..env.mode)
 
 -- this must go first before any startup() call.
-local host = env.setup(env.userdata)
-package.loaded["m3_host"] = host
+package.loaded["m3_host"] = env.setup(env.userdata)
 
--- must go first
-require("m3_effect").startup()
-
--- must go before access and before any data structures
-require("m3_mem").startup()
-
--- must go before fhk
-require("m3_access").startup()
-
--- must go after access
-require("m3_fhk").startup()
+require("m3_data").startup()
 
 -- must go last
 return mode.startup()

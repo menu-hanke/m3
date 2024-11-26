@@ -1,5 +1,4 @@
-local access = require "m3_access"
-local mem = require "m3_mem"
+local data = require "m3_data"
 
 local function tree_compile(tree)
 	if not tree.funcs then
@@ -30,40 +29,30 @@ local function tree_compile(tree)
 end
 
 local function tree_read(tree)
-	return access.defer(function() return tree_compile(tree).flush end)
+	return tree_compile(tree).flush
 end
 
 local function tree_write(tree)
-	access.read(tree.parent)
-	return access.use(
-		access.defer(function() return tree_compile(tree).write end),
-		access.write(tree.parent)
-	)
+	return tree_compile(tree).write
 end
-
-local tree_mt = {
-	data = {
-		type  = "tree",
-		write = tree_write,
-		read  = tree_read
-	}
-}
 
 local function branch_write(branch)
-	access.read(branch.tree.parent)
-	return access.defer(function() return tree_compile(branch.tree).commit end)
+	return tree_compile(branch.tree).commit
 end
 
-local branch_mt = {
-	data = {
-		type  = "tree.branch",
-		write = branch_write
-	}
-}
-
 local function new()
-	local tree = setmetatable({ parent=mem.slot { ctype="int32_t", init=-1 } }, tree_mt)
-	tree.branch = setmetatable({ tree=tree }, branch_mt)
+	local parent = data.memslot("int32_t", -1)
+	local tree = data.dynamic {
+		visit  = function(_,f) return f(nil, parent) end,
+		reader = tree_read,
+		writer = tree_write,
+		parent = parent
+	}
+	tree.branch = data.dynamic {
+		visit  = function(_,f) return f(nil, tree) end,
+		writer = branch_write,
+		tree   = tree,
+	}
 	return tree
 end
 

@@ -152,7 +152,7 @@ m3_cdef.lua: libm3.o
 loader.c:
 	$(BCLOADER) -o $(TARGET) -n m3 -c m3_api -L > $@
 
-CCGITVER = $(shell GITVER=$$(git rev-parse --short HEAD) && echo -DM3_GITVER='\"'$$(echo $$GITVER)'\"')
+CCGITVER = $(shell GITVER=$$(git describe) && echo -DM3_GITVER='\"'$$(echo $$GITVER)'\"')
 CCLJVER  = $(shell GITVER=$$(cd $(LJSRC) && git describe) && echo -DLJ_GITVER='\"'$$(echo $$GITVER)'\"')
 m3.o: XCFLAGS += $(CCGITVER) $(CCLJVER)
 

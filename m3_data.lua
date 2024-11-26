@@ -163,6 +163,10 @@ local function visit(o, f)
 		end
 	elseif tag == "size" then
 		f(nil, o.obj)
+	elseif tag == "splat" then
+		for _,v in ipairs(o.values) do
+			f(nil, v)
+		end
 	elseif tag == "pipe" then
 		f(nil, o.sink)
 	elseif tag == "dynamic" and o.visit then

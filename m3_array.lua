@@ -1,3 +1,4 @@
+local cdata = require "m3_cdata"
 local mem = require "m3_mem"
 local fhk = require "fhk"
 local ffi = require "ffi"
@@ -539,6 +540,9 @@ local function df_of(proto)
 	-- layout must match mem.c
 	ctdef:put("struct { uint32_t num; uint32_t cap; ")
 	for _, col in ipairs(proto) do
+		if col.name ~= cdata.ident(col.name) then
+			error(string.format("dataframe column name is not a valid identifier: `%s'", col.name))
+		end
 		size[col.name] = sizeof(col.ctype)
 		align[col.name] = alignof(col.ctype)
 		ctdef:putf("$ *%s; ", col.name)

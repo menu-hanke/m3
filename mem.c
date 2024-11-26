@@ -77,10 +77,9 @@ CDEFFUNC int m3__mem_grow(m3_Stack *stack)
 	if (UNLIKELY(stack->cursor <= stack->bottom))
 		return 1;
 	intptr_t p = stack->cursor;
-	p &= !(M3_PAGE_SIZE - 1);
+	p &= ~(M3_PAGE_SIZE - 1);
 	if (UNLIKELY(!VirtualAlloc((LPVOID)p, (size_t)(stack->base - p), MEM_COMMIT, PAGE_READWRITE)))
 		return 1;
-	stack->cursor = p;
 	stack->base = p;
 	return 0;
 }

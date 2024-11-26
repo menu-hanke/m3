@@ -23,19 +23,22 @@
 #endif
 #endif
 
-// TODO: should be __declspec(extern) on windows?
+#if M3_WINDOWS
+#define LUAFUNC              __declspec(dllexport)
+#else
 #define LUAFUNC
+#endif
 
 #ifdef M3_LUADEF
 #define CDEF                 @cdef@
 #define LUADEF(...)          @lua@ __VA_ARGS__
 #define LUAVOID(x)           void
-#define CDEFFUNC             CDEF LUAFUNC
+#define CDEFFUNC             CDEF
 #else
 #define CDEF
 #define LUADEF(...)
 #define LUAVOID(x)           x
-#define CDEFFUNC
+#define CDEFFUNC             LUAFUNC
 #endif
 
 CDEF typedef int32_t m3_MRef32;

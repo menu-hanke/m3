@@ -1,5 +1,4 @@
 local environment = require "m3_environment"
-local event = require "m3_event"
 local ffi = require "ffi"
 local buffer = require "string.buffer"
 
@@ -64,6 +63,7 @@ local tokencolor = {
 	string       = "\x1b[32m",
 	tabkey       = "\x1b[36m",
 	number       = "\x1b[33m",
+	special      = "\x1b[34m",
 	curlybracket = "\x1b[1m",
 }
 
@@ -76,8 +76,20 @@ local function putcolor_ansi(buf, text, token)
 	end
 end
 
-local function getpretty(x)
-	return x["m3$pretty"]
+local function cmpkey(a, b)
+	if type(a) == "number" then
+		if type(b) == "number" then
+			return a < b
+		else
+			return true
+		end
+	else
+		if type(b) == "number" then
+			return false
+		else
+			return tostring(a) < tostring(b)
+		end
+	end
 end
 
 local function putpp(x, buf, indent, fmt, rec)
@@ -100,6 +112,12 @@ local function putpp(x, buf, indent, fmt, rec)
 			return
 		end
 		rec[x] = true
+		local mt = getmetatable(x)
+		if mt and mt["m3$pretty"] then
+			local o = mt["m3$pretty"](x, buf, indent, fmt, rec)
+			if o then putpp(o, buf, indent, fmt, rec) end
+			return
+		end
 		putcolor(buf, "{", "curlybracket")
 		local ind = indent..fmt.indent
 		local n = #x
@@ -110,7 +128,11 @@ local function putpp(x, buf, indent, fmt, rec)
 			comma = sep
 			putpp(x[i], buf, ind, fmt, rec)
 		end
-		for k,v in pairs(x) do
+		local keys = {}
+		for k in pairs(x) do table.insert(keys, k) end
+		table.sort(keys, cmpkey)
+		for _,k in ipairs(keys) do
+			local v = x[k]
 			if not isnumkey(k, n) then
 				buf:put(comma)
 				comma = sep
@@ -131,8 +153,6 @@ local function putpp(x, buf, indent, fmt, rec)
 	elseif type(x) == "function" then
 		local info = debug.getinfo(x, "S")
 		buf:putf("<function @ %s:%d>", info.short_src, info.linedefined)
-	elseif pcall(getpretty, x) then
-		x["m3$pretty"](x, buf, indent, fmt, rec)
 	else
 		buf:put(tostring(x))
 	end
@@ -200,36 +220,8 @@ end
 
 ---- trace messages ------------------------------------------------------------
 
-local function trace_off() end
-
-local function trace_heap(slots)
-	error("TODO")
--- 	table.sort(slots, function(a,b)
--- 		return ffi.cast("intptr_t", a.ptr or 0) < ffi.cast("intptr_t", b.ptr or 0)
--- 	end)
--- 	for _,slot in ipairs(slots) do
--- 		if slot.block then
--- 			trace(string.format(
--- 				"%02d.0x%x..+%-3d %s",
--- 				slot.block,
--- 				ffi.cast("intptr_t", slot.ptr),
--- 				ffi.sizeof(slot.ctype),
--- 				slot.ctype
--- 			))
--- 		elseif slot.ptr then
--- 			local acs = access.get(slot)
--- 			if acs == "r" then acs = "r-"
--- 			elseif acs == "w" then acs = "-w"
--- 			else acs = "--" end
--- 			trace(string.format(
--- 				"%s.0x%x..+%-3d %s",
--- 				acs,
--- 				ffi.cast("intptr_t", slot.ptr),
--- 				ffi.sizeof(slot.ctype),
--- 				slot.ctype
--- 			))
--- 		end
--- 	end
+local function trace_data(D)
+	trace(string.format("DATA  %s", pretty(D.data, "sni")))
 end
 
 local function trace_save(fp)
@@ -254,6 +246,21 @@ local function trace_write(...)
 	trace(string.format("WRITE %s -> %s", caller(4), vpretty("", "\t", ...)))
 end
 
+local function trace_apply(ap)
+	local buf = buffer.new()
+	buf:put("APPLY ")
+	local fmt = flags2fmt("")
+	local comma = ""
+	for k,v in pairs(ap.sub) do
+		buf:put(comma)
+		comma = "\t"
+		putpp(k, buf, "", fmt, {})
+		buf:put("<-")
+		putpp(v, buf, "", fmt, {})
+	end
+	trace(tostring(buf))
+end
+
 local function mask2str(mask)
 	local idx = {}
 	for i=0, 63 do
@@ -269,38 +276,62 @@ local function trace_mask(mask)
 end
 
 local trace_events = {
-	heap  = { flags="h", func=trace_heap },
-	save  = { flags="s", func=trace_save },
-	load  = { flags="s", func=trace_load },
-	mask  = { flags="s", func=trace_mask },
-	read  = { flags="a", func=trace_read },
-	write = { flags="a", func=trace_write }
+	data  = { mask="d", func=trace_data },
+	save  = { mask="s", func=trace_save },
+	load  = { mask="s", func=trace_load },
+	mask  = { mask="s", func=trace_mask },
+	read  = { mask="r", func=trace_read },
+	write = { mask="w", func=trace_write },
+	apply = { mask="a", func=trace_apply }
 }
 
--- trace flags:
---   a    access
---   h    heap layout
---   s    save points
-local function traceon(flags)
-	flags = flags or "ahs"
-	local events = setmetatable({}, {__index=function() return trace_off end})
+local TRACE_ALL = "dsrwa"
+local trace_dispatch = {}
+
+local function trace_off() end
+
+local function trace_on(flags)
+	if flags == true then flags = TRACE_ALL end
+	local target = setmetatable({}, {__index=function() return trace_off end})
 	for event,def in pairs(trace_events) do
-		if flags:match(def.flags) then
-			events[event] = def.func
+		if flags:match(def.mask) then
+			target[event] = def.func
 		end
 	end
-	local ct = ffi.metatype("struct {}", {__index=events})
-	event.listener(load([[
-		local ct = ...
-		return function(event, ...) return ct[event](...) end
-	]])(ct))
+	trace_dispatch = ffi.metatype("struct {}", {__index=target})
+	return load([[
+		local dispatch = ...
+		return function(event, ...) return dispatch[event](...) end
+	]])(trace_dispatch)
+end
+
+local event = load([[
+	local target = ...
+	return function(...) return target(...) end
+]])(trace_off)
+
+local function settrace(flags)
+	local target
+	if flags then
+		target = trace_on(flags)
+	else
+		target = trace_off
+	end
+	debug.setupvalue(event, 1, target)
+end
+
+local function gettrace(event)
+	local f = trace_dispatch[event]
+	if f and f ~= trace_off then return f end
 end
 
 --------------------------------------------------------------------------------
 
 return {
-	traceon = traceon,
-	putpp   = putpp,
-	pretty  = pretty,
-	pprint  = pprint
+	settrace = settrace,
+	gettrace = gettrace,
+	event    = event,
+	putpp    = putpp,
+	pretty   = pretty,
+	pprint   = pprint
 }

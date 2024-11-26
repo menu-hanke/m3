@@ -106,8 +106,8 @@ local function command(o, v)
 	elseif o == "x" then
 		error("TODO")
 	elseif o == "v" then
-		if v == "" then v = nil end
-		require("m3_debug").traceon(v)
+		if v == "" then v = true end
+		require("m3_debug").settrace(v)
 	end
 end
 

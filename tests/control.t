@@ -1,6 +1,4 @@
 -- vim: ft=lua
-local m3 = require "m3_api"
-
 local restree = tree()
 local result = {}
 connect(restree, function(x) table.insert(result, x) end)

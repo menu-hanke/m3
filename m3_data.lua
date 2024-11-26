@@ -1,6 +1,7 @@
 local array = require "m3_array"
 local cdef = require "m3_cdef"
 local constify = require "m3_constify"
+local de = require "m3_debug"
 local environment = require "m3_environment"
 local mem = require "m3_mem"
 local fhk = require "fhk"
@@ -8,6 +9,7 @@ local ffi = require "ffi"
 local buffer = require "string.buffer"
 require "table.clear"
 local C = ffi.C
+local debugevent = de.event
 local stack = mem.stack
 
 local G = fhk.newgraph()
@@ -24,15 +26,48 @@ local D = {
 	apply    = {}, -- [name] -> {trampoline,r,w}
 }
 
----- Data objects --------------------------------------------------------------
-
-local function newmeta(tag)
-	return { ["m3$tag"] = tag }
-end
+---- Pretty printing -----------------------------------------------------------
 
 local function gettag(x)
 	local mt = getmetatable(x)
 	return mt and mt["m3$tag"]
+end
+
+local function pretty(o, buf, _, fmt)
+	local tag = gettag(o)
+	local putcolor = fmt.putcolor
+	putcolor(
+		buf,
+		string.format(
+			"<%s[%s%s]> ",
+			tag,
+			o.read and "r" or "-",
+			o.write and "w" or "-"
+		),
+		"special"
+	)
+	if tag == "memslot" then
+		buf:put(tostring(o.ctype))
+		if o.ptr then
+			buf:putf("[0x%x]", ffi.cast("intptr_t", o.ptr))
+		end
+	elseif tag == "column" then
+		buf:put(tostring(o.ctype))
+		if o.df.slot.ptr then
+			buf:putf("[0x%x]", ffi.cast("intptr_t", o.df.slot.ptr)
+				+ ffi.offsetof(o.df.slot.ctype, o.name))
+		end
+	elseif tag == "struct" then
+		return o.fields
+	elseif tag == "dataframe" then
+		return o.columns
+	end
+end
+
+---- Data objects --------------------------------------------------------------
+
+local function newmeta(tag)
+	return { ["m3$tag"] = tag, ["m3$pretty"] = pretty }
 end
 
 -- static memory slot
@@ -888,12 +923,20 @@ end
 local function nop() end
 
 -- TODO: this is logically a write so everything above applies
-local function compileapply(ap)
+local function compileapply(ap, debugapply)
 	if not ap.query then return nop end
 	local ctx = newemit()
 	emitmasks(ctx, ap)
 	ctx.uv.query = ap.query.query
 	ctx.uv.graph_instance = graph_instance
+	if debugapply then
+		ctx.uv.debugapply = debugapply
+		ctx.buf:put("debugapply{sub={")
+		for o,v in pairs(ap.sub) do
+			ctx.buf:putf("[%s] = Q.%s, ", upvalname(ctx, o), v)
+		end
+		ctx.buf:put("}}\n")
+	end
 	for o,v in pairs(ap.sub) do
 		emitwrite(ctx, o, string.format("Q.%s", v))
 	end
@@ -908,15 +951,32 @@ local function compileapply(ap)
 	return load(buf)(unpack(uv))
 end
 
+local function debug_read(event, ...)
+	event(...)
+	return ...
+end
+
 local function compileaccess()
+	local debugread, debugwrite = de.gettrace("read"), de.gettrace("write")
+	local debugapply = de.gettrace("apply")
 	for r,t in pairs(D.trampoline.read) do
-		debug.setupvalue(t, 1, compileread(r))
+		r = compileread(r)
+		if debugread then
+			local rf = r
+			r = function() return debug_read(debugread, rf()) end
+		end
+		debug.setupvalue(t, 1, r)
 	end
 	for w,t in pairs(D.trampoline.write) do
-		debug.setupvalue(t, 1, compilewrite(w))
+		w = compilewrite(w)
+		if debugwrite then
+			local wf = w
+			w = function(...) debugwrite(...) return wf(...) end
+		end
+		debug.setupvalue(t, 1, w)
 	end
 	for _,ap in pairs(D.apply) do
-		debug.setupvalue(ap.trampoline, 1, compileapply(ap))
+		debug.setupvalue(ap.trampoline, 1, compileapply(ap, debugapply))
 	end
 end
 
@@ -1114,6 +1174,7 @@ local function startup()
 	-- compile access functions (read, write, apply)
 	compileaccess()
 	-- free memory
+	debugevent("data", D)
 	table.clear(D)
 end
 

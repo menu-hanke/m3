@@ -103,7 +103,7 @@ M3GENLUA       = m3_cdef.lua
 ifeq (y,$(LINKLUA))
 M3LUA_O        = m3.lua.o m3_api.lua.o m3_array.lua.o m3_cdata.lua.o m3_cdef.lua.o \
 				 m3_constify.lua.o m3_control.lua.o m3_data.lua.o m3_debug.lua.o \
-				 m3_environment.lua.o m3_event.lua.o m3_ipc.lua.o m3_loop.lua.o \
+				 m3_environment.lua.o m3_ipc.lua.o m3_loop.lua.o \
 				 m3_mem.lua.o m3_mp.lua.o m3_mp_main.lua.o m3_mp_worker.lua.o \
 				 m3_serial.lua.o m3_shm.lua.o m3_shutdown.lua.o m3_startup.lua.o m3_tree.lua.o
 M3EXELUA_O     = m3_input_data.lua.o m3_input_ndjson.lua.o m3_simulate.lua.o m3_test.lua.o

@@ -224,12 +224,16 @@ local function trace_data(D)
 	trace(string.format("DATA  %s", pretty(D.data, "sni")))
 end
 
+local function fpfmt(fp)
+	return -fp, require("m3_mem").stack.top+fp
+end
+
 local function trace_save(fp)
-	trace(string.format("SAVE  0x%x", -fp))
+	trace(string.format("SAVE  0x%x (0x%x)", fpfmt(fp)))
 end
 
 local function trace_load(fp)
-	trace(string.format("LOAD  0x%x", -fp))
+	trace(string.format("LOAD  0x%x (0x%x)", fpfmt(fp)))
 end
 
 local function caller(level)

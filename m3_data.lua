@@ -1,6 +1,5 @@
 local array = require "m3_array"
 local cdef = require "m3_cdef"
-local constify = require "m3_constify"
 local de = require "m3_debug"
 local environment = require "m3_environment"
 local mem = require "m3_mem"
@@ -8,12 +7,9 @@ local fhk = require "fhk"
 local ffi = require "ffi"
 local buffer = require "string.buffer"
 require "table.clear"
-local C = ffi.C
 local debugevent = de.event
-local stack = mem.stack
 
 local G = fhk.newgraph()
-local G_state = constify.new() -- this will get G_state.ptr
 
 local D = {
 	data     = nil, -- assigned below (struct)
@@ -49,17 +45,23 @@ local function pretty(o, buf, _, fmt)
 	if tag == "memslot" then
 		buf:put(tostring(o.ctype))
 		if o.ptr then
-			buf:putf("[0x%x]", ffi.cast("intptr_t", o.ptr))
+			buf:putf(" [0x%x]", ffi.cast("intptr_t", o.ptr))
+		end
+		if o.block then
+			buf:putf(" (block %d)", o.block)
 		end
 	elseif tag == "column" then
 		buf:put(tostring(o.ctype))
 		if o.df.slot.ptr then
-			buf:putf("[0x%x]", ffi.cast("intptr_t", o.df.slot.ptr)
+			buf:putf(" [0x%x]", ffi.cast("intptr_t", o.df.slot.ptr)
 				+ ffi.offsetof(o.df.slot.ctype, o.name))
 		end
 	elseif tag == "struct" then
 		return o.fields
 	elseif tag == "dataframe" then
+		if o.slot.block then
+			buf:putf("(block %d) ", o.slot.block)
+		end
 		return o.columns
 	end
 end
@@ -411,7 +413,14 @@ end
 
 ---- Mask computation ----------------------------------------------------------
 
+-- TODO: update the layouter to allow splitting a dataframe into so that each column has its own
+-- slot but they are still contiguous in memory (ie. `region` field to memslot and require that
+-- slots with the same region are contiguous, also add an `order` field so that len/cap goes first)
 local function visitflatten(o, s)
+	if gettag(o) == "column" then
+		-- this case can be removed when the above TODO is implemented
+		visitflatten(o.df.slot, s)
+	end
 	visitrec(o, function(_,x) s[x] = true end)
 end
 
@@ -432,6 +441,20 @@ local function computemasks()
 			error("TODO")
 		end
 	end
+	-- compute fhk masks
+	for g in G:objects() do
+		if g.op == "VAR" and g.m3_mapping then
+			for w,ws in pairs(wset) do
+				if ws[g.m3_mapping] then
+					if not w.reset then
+						w.reset = G:newreset()
+						wset[w][D.G_state] = true
+					end
+					w.reset:add(g)
+				end
+			end
+		end
+	end
 	-- compute write mask
 	for w,ws in pairs(wset) do
 		for o in pairs(ws) do
@@ -440,30 +463,9 @@ local function computemasks()
 			end
 		end
 	end
-	-- compute fhk masks
-	for g in G:objects() do
-		if g.op == "VAR" and g.m3_mapping then
-			for w,ws in pairs(wset) do
-				if ws[g.m3_mapping] then
-					if not w.reset then
-						w.reset = G:newreset()
-					end
-					w.reset:add(g)
-				end
-			end
-		end
-	end
 end
 
 ---- Graph compilation ---------------------------------------------------------
-
-local function graph_instance()
-	local state = G_state()
-	local instance = G:newinstance(C.m3__mem_extalloc, stack, state.instance, state.mask)
-	state.instance = instance
-	state.mask = 0
-	return instance
-end
 
 local ctype2fhk = {}
 for c,f in pairs {
@@ -540,6 +542,10 @@ local function compilegraph()
 	G:define(buf)
 	-- compile!
 	G = assert(G:compile("g"))
+	-- pre-create instance so that instance creation can assume we always have a non-null instance
+	-- available
+	D.G_state.ptr.instance = G:newinstance(ffi.C.m3__mem_extalloc, mem.stack)
+	D.G_state.ptr.mask = 0
 end
 
 ---- Access --------------------------------------------------------------------
@@ -875,19 +881,7 @@ local function emitupvalues(uv, buf)
 	return vs
 end
 
-local function emitmasks(ctx, stmt)
-	if stmt.mmask then
-		ctx.uv.mem_setmask = mem.setmask
-		ctx.buf:putf("mem_setmask(0x%xull)\n", stmt.mmask)
-	end
-	if stmt.reset then
-		ctx.uv.G_state = G_state()
-		ctx.uv.bor = bit.bor
-		ctx.buf:putf("G_state.mask = bor(G_state.mask, 0x%xull)\n", stmt.reset.mask)
-	end
-end
-
-local function compileread(o)
+local function compileread(o, graph_instance)
 	local ctx = newemit()
 	if o.query then
 		ctx.uv.query = o.query.query
@@ -906,12 +900,24 @@ local function compileread(o)
 	return load(buf)(unpack(uv))
 end
 
+local function emitmask(ctx, o)
+	if o.mmask then
+		ctx.uv.mem_setmask = mem.setmask
+		ctx.buf:putf("mem_setmask(0x%xull)\n", o.mmask)
+	end
+	if o.reset then
+		ctx.uv.G_state = D.G_state.ptr
+		ctx.uv.bor = bit.bor
+		ctx.buf:putf("G_state.mask = bor(G_state.mask, 0x%xull)\n", o.reset.mask)
+	end
+end
+
 -- TODO: re-check alive variables depending on mask
 -- TODO: this doesn't need varargs, just take as many args as the splat has, or one if it's
 -- not a splat
 local function compilewrite(o)
 	local ctx = newemit()
-	emitmasks(ctx, o)
+	emitmask(ctx, o)
 	local value = emitwrite(ctx, o, "...")
 	local buf = buffer.new()
 	local uv = emitupvalues(ctx.uv, buf)
@@ -927,12 +933,14 @@ end
 local function nop() end
 
 -- TODO: this is logically a write so everything above applies
-local function compileapply(ap, debugapply)
+local function compileapply(ap, debugapply, graph_instance)
 	if not ap.query then return nop end
 	local ctx = newemit()
-	emitmasks(ctx, ap)
-	ctx.uv.query = ap.query.query
 	ctx.uv.graph_instance = graph_instance
+	ctx.uv.query = ap.query.query
+	-- query must happen before emitmask here
+	ctx.buf:put("local Q = query(graph_instance())\n")
+	emitmask(ctx, ap)
 	if debugapply then
 		ctx.uv.debugapply = debugapply
 		ctx.buf:put("debugapply{sub={")
@@ -949,7 +957,7 @@ local function compileapply(ap, debugapply)
 	end
 	local buf = buffer.new()
 	local uv = emitupvalues(ctx.uv, buf)
-	buf:put("return function()\nlocal Q = query(graph_instance())\n")
+	buf:put("return function()\n")
 	buf:put(ctx.buf)
 	buf:put("end\n")
 	return load(buf)(unpack(uv))
@@ -960,11 +968,38 @@ local function debug_read(event, ...)
 	return ...
 end
 
+-- TODO: this should take a query mask parameter and only create a new instance if the intersection
+-- is nonzero
+local function graph_instancefunc()
+	return load(string.format([[
+		local state, G, C, stack, setmask, iswritable = ...
+		return function()
+			if not iswritable(state.instance) then
+				setmask(0x%xull)
+				goto new
+			end
+			if state.mask == 0 then
+				return state.instance
+			end
+			::new::
+			local instance = G:newinstance(C.m3__mem_extalloc, stack, state.instance, state.mask)
+			state.instance = instance
+			state.mask = 0
+			return instance
+		end
+	]], bit.lshift(1ULL, D.G_state.block)))(D.G_state.ptr, G, ffi.C, mem.stack, mem.setmask,
+		mem.iswritable)
+end
+
 local function compileaccess()
 	local debugread, debugwrite = de.gettrace("read"), de.gettrace("write")
 	local debugapply = de.gettrace("apply")
+	local graph_instance
+	if D.G_state then
+		graph_instance = graph_instancefunc()
+	end
 	for r,t in pairs(D.trampoline.read) do
-		r = compileread(r)
+		r = compileread(r, graph_instance)
 		if debugread then
 			local rf = r
 			r = function() return debug_read(debugread, rf()) end
@@ -980,7 +1015,7 @@ local function compileaccess()
 		debug.setupvalue(t, 1, w)
 	end
 	for _,ap in pairs(D.apply) do
-		debug.setupvalue(ap.trampoline, 1, compileapply(ap, debugapply))
+		debug.setupvalue(ap.trampoline, 1, compileapply(ap, debugapply, graph_instance))
 	end
 end
 
@@ -1077,7 +1112,7 @@ local function createheap(slots)
 	-- use luajit allocator for the heap so that const heap references become
 	-- relative addresses in machine code.
 	local heap = ffi.new(ffi.typeof("$[?]", block_ct), block+1)
-	mem.setheap(heap, blocksize*(block+1))
+	mem.setheap(heap, blocksize, block+1)
 	for _, slot in ipairs(slots) do
 		slot.ptr = ffi.cast(
 			ffi.typeof("$*", slot.ctype),
@@ -1087,7 +1122,7 @@ local function createheap(slots)
 end
 
 local function malloc(size)
-	return ffi.gc(C.malloc(size), C.free)
+	return ffi.gc(ffi.C.malloc(size), ffi.C.free)
 end
 
 local function createdummy(slots)
@@ -1158,9 +1193,6 @@ local function memlayout()
 		if o.ptr and o.init then
 			o.ptr[0] = o.init
 		end
-	end
-	if D.G_state then
-		constify.set(G_state, D.G_state.ptr)
 	end
 end
 

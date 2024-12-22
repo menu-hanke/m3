@@ -140,9 +140,10 @@ local anchor = setmetatable({}, {
 	end
 })
 
-local function setheap(ptr, size)
+local function setheap(ptr, blocksize, num)
 	ss.heap = anchor(ptr)
-	constify.set(heapsize, size)
+	ss.blocksize = blocksize
+	constify.set(heapsize, blocksize*num)
 end
 
 -- note: iswritable() only works for the main stack.
@@ -152,7 +153,7 @@ local function iswritable(ptr)
 end
 
 local function mem_save()
-	local cursor = band(ss.stack.cursor, bnot(64))
+	local cursor = band(ss.stack.cursor, bnot(63))
 	cursor = cursor - heapsize()
 	ss.stack.cursor = cursor-16
 	if ss.stack.cursor < ss.stack.base then

@@ -1,5 +1,6 @@
 -- control library.
 
+local data = require "m3_data"
 local mem = require "m3_mem"
 local buffer = require "string.buffer"
 local rawget, rawset = rawget, rawset
@@ -28,7 +29,7 @@ end
 
 local function toedges(edges, dest)
 	for _,e in ipairs(edges) do
-		if type(e) == "table" then
+		if type(e) == "table" and not data.istransaction(e) then
 			if e.tag then
 				table.insert(dest, e)
 			else
@@ -317,7 +318,11 @@ function emitfunc.call(node)
 	buf:put("end\n")
 	buf_continue(buf)
 	buf_end(buf)
-	return load(buf, chunkname(string.format("call@%s", debugname(node.f))))(mem.resetx, node.f, node)
+	local f = node.f
+	if data.istransaction(f) then
+		f = f.func
+	end
+	return load(buf, chunkname(string.format("call@%s", debugname(f))))(mem.resetx, f, node)
 end
 
 -- all ---------------------------------

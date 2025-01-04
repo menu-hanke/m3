@@ -21,8 +21,9 @@ init.readfile      = init
 
 init.read          = m3.read
 init.write         = m3.write
-init.apply         = m3.apply
+init.transaction   = m3.data.transaction
 init.define        = m3.data.define
+init.defined       = m3.data.defined
 init.include       = m3.data.include
 init.connect       = m3.data.connect
 init.pipe          = m3.data.pipe
@@ -158,7 +159,8 @@ end
 
 -- TODO: this graph function should get special treatment,
 -- eg. inputs that are only referenced from this should not be saved in memory etc.
-local initfn = m3.apply "init"
+-- TODO: init
+-- local initfn = m3.apply "init"
 
 local function host()
 	local input = loadinput()
@@ -174,7 +176,7 @@ local function host()
 		local writeinput = m3.write(inpipe)
 		m3.data.connect(inpipe, function(v)
 			inputread(v)
-			initfn()
+			--TODO initfn()
 			return driver()
 		end)
 		work = function()
@@ -186,7 +188,7 @@ local function host()
 		local inputread = assert(input.read, "input must define at least one of `next' or `read'")
 		work = function()
 			if inputread() == false then return end
-			initfn()
+			--TODO initfn()
 			return driver()
 		end
 	end

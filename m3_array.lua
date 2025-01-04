@@ -380,7 +380,7 @@ local function df_clear(df, idx)
 	if idx == nil then
 		df.num = 0
 		df.cap = 0
-	else
+	elseif #idx > 0 then
 		tmp.i64 = scratch.cursor
 		local proto = df["m3$cproto"]
 		local num, nc = buildcopylist(idx, df.num)

@@ -24,7 +24,12 @@ m3.control = {
 
 m3.data = {
 	define         = data.define,
+	defined        = data.defined,
 	include        = data.include,
+	transaction    = data.transaction,
+	substitute     = data.substitute,
+	delete         = data.delete,
+	insert         = data.insert,
 	globals        = data.globals,
 	pipe           = data.pipe,
 	shared         = data.shared,

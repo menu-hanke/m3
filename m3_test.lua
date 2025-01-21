@@ -1,16 +1,20 @@
 local completed = {}
 local todo = {}
 local current, pattern, isglob
-local ok
+local ok, errpattern
 local num = 0
 
 local function glob_gsub(char)
 	return char == "*" and ".*" or ("%"..char)
 end
 
+local function namepattern(name)
+	return "^"..name:gsub("[%^%$%(%)%%%.%[%]%*%+%-%+]", glob_gsub).."$"
+end
+
 local function set(name)
 	current = name
-	pattern = "^"..name:gsub("[%^%$%(%)%%%.%[%]%*%+%-%+]", glob_gsub).."$"
+	pattern = namepattern(name)
 	isglob = name:match("%*") ~= nil
 end
 
@@ -36,6 +40,9 @@ local function test(name)
 		set(name)
 		return true
 	end
+	if name:match("%*") and current:match(namepattern(name)) then
+		return true
+	end
 	return false
 end
 
@@ -58,12 +65,18 @@ local function more()
 		return false
 	end
 	ok = true
+	errpattern = nil
 	set(name)
 	return true
 end
 
+local function seterr(pat)
+	errpattern = pat
+end
+
 local function fail(tb)
 	if ok then
+		if errpattern and tb:match(errpattern) then return end
 		ok = false
 		num = num+1
 		io.stdout:write("not ok ", num, " - ", current, "\n")
@@ -77,5 +90,6 @@ return {
 	settest = settest,
 	test    = test,
 	more    = more,
+	seterr  = seterr,
 	fail    = fail
 }

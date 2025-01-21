@@ -3,4 +3,5 @@
 	lua*;
 	luaJIT_*;
 	fhk_*;
+	sqlite3_*;
 };

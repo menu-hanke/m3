@@ -306,13 +306,12 @@ end
 
 function emitfunc.call(node)
 	local buf = buffer.new()
-	buf:put("local rawget, resetx, f, node = rawget, ...\n")
+	buf:put("local rawget, f, node = rawget, ...\n")
 	buf_argsload(buf, node)
 	buf_header(buf)
 	buf:put("local r = f(")
 	buf_argscall(buf, node)
 	buf:put(")\n")
-	buf:put("resetx()\n")
 	buf:put("if r == false then\n")
 	buf_ret(buf)
 	buf:put("end\n")
@@ -322,22 +321,19 @@ function emitfunc.call(node)
 	if data.istransaction(f) then
 		f = f.func
 	end
-	return load(buf, chunkname(string.format("call@%s", debugname(f))))(mem.resetx, f, node)
+	return load(buf, chunkname(string.format("call@%s", debugname(f))))(f, node)
 end
 
 -- all ---------------------------------
 
--- TODO: resetx can be omitted if f is simple enough (eg. it has no upvalues that could call mem.alloc)
--- TODO?: resetx could be instead handled in mem.alloc (reset on frame change)
 local function emit_chain_func(node, chain)
 	local buf = buffer.new()
-	buf:put("local rawget, resetx, f, node, chain = rawget, ...\n")
+	buf:put("local rawget, f, node, chain = rawget, ...\n")
 	buf_argsload(buf, node)
 	buf_header(buf)
 	buf:putf("local r = f(")
 	buf_argscall(buf, node)
 	buf:putf(")\n")
-	buf:put("resetx()\n")
 	buf:put("if r == false then\n")
 	buf_ret(buf)
 	buf:put("end\n")
@@ -346,7 +342,7 @@ local function emit_chain_func(node, chain)
 	return load(
 		buf,
 		chunkname(string.format("chain call@%s", debugname(f)))
-	)(mem.resetx, node.f, node, chain)
+	)(node.f, node, chain)
 end
 
 local function emit_chain_ctrl(node, chain)

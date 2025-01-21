@@ -74,6 +74,19 @@ M3EXE_LUAJIT   = $(LJA) -lm -ldl
 M3SO_LUAJIT    = $(LJDLL)
 endif
 
+# ---- SQLite ------------------------------------------------------------------
+
+SQLITESRC      = sqlite
+SQLITE3H       = $(SQLITESRC)/sqlite3.h
+SQLITE3C       = $(SQLITESRC)/sqlite3.c
+SQLITEINCLUDE  = -I$(SQLITESRC)
+ifeq (Windows,$(TARGET))
+# TODO
+else
+M3EXE_SQLITE   = $(SQLITESRC)/sqlite3.o
+M3SO_SQLITE    = $(SQLITESRC)/sqlite3.pic.o
+endif
+
 # ---- Compiler & Linker options -----------------------------------------------
 
 ifneq (y,$(DEBUG))
@@ -90,7 +103,7 @@ ifneq (Windows,$(TARGET))
 M3EXE_SYMS     = -Wl,--dynamic-list=dynamic.list
 endif
 
-CCOPTIONS      = $(XCFLAGS) $(LJINCLUDE) $(CFLAGS)
+CCOPTIONS      = $(XCFLAGS) $(LJINCLUDE) $(SQLITEINCLUDE) $(CFLAGS)
 LDOPTIONS      = -Wl,--gc-sections $(LDFLAGS)
 
 # ---- Objects -----------------------------------------------------------------
@@ -101,12 +114,11 @@ M3A_O          = libm3.o
 M3GENLUA       = m3_cdef.lua
 
 ifeq (y,$(LINKLUA))
-M3LUA_O        = m3.lua.o m3_api.lua.o m3_array.lua.o m3_cdata.lua.o m3_cdef.lua.o \
-				 m3_constify.lua.o m3_control.lua.o m3_data.lua.o m3_debug.lua.o \
-				 m3_environment.lua.o m3_ipc.lua.o m3_loop.lua.o \
-				 m3_mem.lua.o m3_mp.lua.o m3_mp_main.lua.o m3_mp_worker.lua.o \
-				 m3_serial.lua.o m3_shm.lua.o m3_shutdown.lua.o m3_startup.lua.o m3_tree.lua.o
-M3EXELUA_O     = m3_input_data.lua.o m3_input_ndjson.lua.o m3_simulate.lua.o m3_test.lua.o
+M3LUA_O        = m3.lua.o m3_array.lua.o m3_cdata.lua.o m3_cdef.lua.o m3_code.lua.o \
+				 m3_constify.lua.o m3_control.lua.o m3_data.lua.o m3_debug.lua.o m3_loop.lua.o \
+				 m3_mem.lua.o m3_mp.lua.o m3_mp_main.lua.o m3_mp_worker.lua.o m3_shutdown.lua.o \
+				 m3_sqlite.lua.o m3_uid.lua.o
+M3EXELUA_O     = m3_simulate.lua.o m3_test.lua.o
 endif
 
 ifeq (y,$(LINKJIT))
@@ -119,14 +131,14 @@ endif
 
 # ---- Targets -----------------------------------------------------------------
 
-$(M3_EXE): $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O) $(M3GENLUA)
+$(M3_EXE): $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O) $(M3GENLUA) $(M3EXE_SQLITE)
 	$(CC) $(LDOPTIONS) $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O) \
-		$(M3EXE_LUAJIT) $(M3EXE_FHK) $(M3EXE_SYMS) \
+		$(M3EXE_LUAJIT) $(M3EXE_FHK) $(M3EXE_SQLITE) $(M3EXE_SYMS) \
 		-o $@
 	$(STRIP) $@
 
-$(M3_SO): $(M3SO_O) $(M3LUA_O) $(M3GENLUA)
-	$(CC) $(LDOPTIONS) $(M3SO_O) $(M3LUA_O) $(M3SO_LUAJIT) -shared -o $@
+$(M3_SO): $(M3SO_O) $(M3LUA_O) $(M3GENLUA) $(M3SO_SQLITE)
+	$(CC) $(LDOPTIONS) $(M3SO_O) $(M3LUA_O) $(M3SO_LUAJIT) $(M3SO_SQLITE) -shared -o $@
 	$(STRIP) $@
 
 $(M3_A): $(M3A_O) $(M3LUA_O) $(M3GENLUA)

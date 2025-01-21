@@ -1,4 +1,0 @@
--- require "m3_cdef"
--- 
--- local env = debug.getregistry()["m3$environment"]
--- env.mode = env.parallel and "mp" or "serial"

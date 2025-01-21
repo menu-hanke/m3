@@ -1,83 +1,37 @@
-local m3 = require "m3_api"
+local m3 = require "m3"
 
-local input = coroutine.wrap(function() coroutine.yield({}) end)
-local driver = {}
-local branch = m3.data.pipe()
-local tree = m3.data.pipe()
-local write_branch = m3.write(branch)
-local write_tree = m3.write(tree)
+local global_config = {
+	insn  = {},
+	tab   = nil,
+	col   = "rowid",
+	query = nil
+}
 
----- Config environment --------------------------------------------------------
+local globals = {
+	"all", "any", "call", "dynamic", "exec", "first", "loop", "nothing", "optional", "skip", "try",
+	"arg", "cdata", "connect", "define", "defined", "func", "include", "pipe", "ret", "transaction",
+	"pprint",
+	"database", "datadef",
+	"uid"
+}
+for _,func in ipairs(globals) do _G[func] = m3[func] end
 
-local init         = setmetatable({}, {
-	__index = _G,
-	__call = function(self, f, ...)
-		if type(f) == "string" then f = assert(loadfile(f)) end
-		return setfenv(f, self)(...)
-	end
-})
+if not test then
+	function test() return false end
+end -- else: m3 is in test mode, test is a C funtion
 
-init.readfile      = init
-
-init.read          = m3.read
-init.write         = m3.write
-init.transaction   = m3.data.transaction
-init.define        = m3.data.define
-init.defined       = m3.data.defined
-init.include       = m3.data.include
-init.connect       = m3.data.connect
-init.pipe          = m3.data.pipe
-
-init.nothing       = m3.control.nothing
-init.skip          = m3.control.skip
-init.call          = m3.control.call
-init.all           = m3.control.all
-init.any           = m3.control.any
-init.optional      = m3.control.optional
-init.first         = m3.control.first
-init.try           = m3.control.try
-init.loop          = m3.control.loop
-init.dynamic       = m3.control.dynamic
-
--- TODO: this always causes a recompilation, maybe cache the instructions.
-function init.exec(insn)
-	m3.control.exec(m3.control.all { insn, write_branch })
-	write_tree()
+-- TODO make this more general:
+--   * allow specifying which column(s) `query` iterates over
+--   * allow specifying multiple tables
+--   * allow specifying how other tables are joined
+function input(tab, query)
+	global_config.tab = tab
+	global_config.query = query
 end
 
-function init.input(x) input = x end
-function init.simulate(x) driver = x end
-
-function init.tree()
-	local t = m3.data.tree()
-	m3.data.connect(branch, m3.write(t.branch))
-	local pipe = m3.data.pipe():map(m3.read(t))
-	m3.data.connect(tree, pipe)
-	return m3.data.dynamic {
-		visit   = function(_,f) f(nil, t) f(nil, pipe) end,
-		writer  = function() return t:writer() end,
-		connect = function(_, sink) return m3.data.connect(pipe, sink) end
-	}
+function simulate(insn)
+	table.insert(global_config.insn, m3.all(insn))
 end
-
----- Test driver ---------------------------------------------------------------
-
-local ctest = debug.getregistry()["m3$test"]
-local testhooks
-if ctest then
-	init.test = setmetatable({}, {
-		__call = function(_, ...) return ctest(...) end,
-		__index = { simulate = function(a,b) return ctest(a, function() init.simulate(b) end) end }
-	})
-else
-	local function disabled() return false end
-	init.test = setmetatable({}, {
-		__call = disabled,
-		__index = { simulate=disabled }
-	})
-end
-
----- CLI options ---------------------------------------------------------------
 
 local function unpackiter(f)
 	local v = f()
@@ -85,7 +39,7 @@ local function unpackiter(f)
 	return v, unpackiter(f)
 end
 
-local function command(o, v)
+local function cmd(o, v)
 	if o == "j" then
 		local cmd, opt = v:match("^([^=]+)=(.*)$")
 		if cmd then
@@ -102,107 +56,81 @@ local function command(o, v)
 		jit.opt.start(unpackiter(v:gmatch("[^,]+")))
 	elseif o == "l" then
 		require(v)
-	elseif o == "i" then
-		input = v
-	elseif o == "x" then
+	elseif o == "d" then
 		error("TODO")
 	elseif o == "v" then
-		if v == "" then v = true end
-		require("m3_debug").settrace(v)
+		m3.trace(v == "" and true or v)
 	end
 end
 
----- Host callbacks ------------------------------------------------------------
-
-local function parseurl(url)
-	local module, path = url:match("^([^:]+):(.*)$")
-	if module then return module, path end
-	path = url
-	module = path:match("^.*%.([^%.]+)$")
-	if module then return module, path end
-	error(string.format("cannot infer file type from path: %s", url))
-end
-
-local function loadinputmodule(name, ...)
-	name = "m3_input_"..name
-	local errors = {}
-	for _,loader in ipairs(package.loaders) do
-		local module = loader(name)
-		if type(module) == "function" then
-			return module(...)
-		elseif type(module) == "string" then
-			table.insert(errors, module)
+local init = m3.transaction():autoselect(function(name, tab)
+	if not global_config.tab then return end
+	local main = m3.sql_escape(global_config.tab)
+	local sql = {m3.sql("WHERE", string.format("%s.%s=?", main, global_config.col))}
+	if name ~= global_config.tab then
+		-- TODO: `input` should allow specifying the join condition here
+		table.insert(sql, m3.sql("FROM", main))
+		for _,fk in ipairs(tab.foreign_keys) do
+			if fk.table == global_config.tab then
+				for _,f in ipairs(fk.fields) do
+					table.insert(sql, m3.sql("WHERE", string.format("%s.%s=%s.%s",
+						main, f.to, m3.sql_escape(name), f.from)))
+				end
+				break
+			end
 		end
 	end
-	error(string.format("could not load input module `%s': %s", name, table.concat(errors)))
-end
+	return sql, m3.arg(1)
+end)
 
-local function loadinput()
-	if type(input) == "string" then
-		return loadinputmodule(parseurl(input))
-	elseif type(input) == "function" then
-		return {next=input}
-	elseif (input.next or input.read) then
-		return input
-	else
-		return loadinputmodule("data", input)
-	end
-end
-
-local function loaddriver()
-	if type(driver) == "table" then
-		return function() return init.exec(driver) end
-	else
-		return driver
-	end
-end
-
--- TODO: this graph function should get special treatment,
--- eg. inputs that are only referenced from this should not be saved in memory etc.
--- TODO: init
--- local initfn = m3.apply "init"
-
-local function host()
-	local input = loadinput()
-	if input.next and not input.read then
-		input.read = m3.write(m3.data.globals())
-	end
-	local driver = loaddriver()
-	local work
-	if input.next then
-		local inputnext = input.next
-		local inputread = input.read
-		local inpipe = m3.data.shared.input()
-		local writeinput = m3.write(inpipe)
-		m3.data.connect(inpipe, function(v)
-			inputread(v)
-			--TODO initfn()
-			return driver()
-		end)
-		work = function()
-			local v = inputnext()
-			if v == nil then return false end
-			writeinput(v)
-		end
-	else
-		local inputread = assert(input.read, "input must define at least one of `next' or `read'")
-		work = function()
-			if inputread() == false then return end
-			--TODO initfn()
-			return driver()
+local function autotab()
+	local tab
+	for o in m3.G:objects() do
+		if o.op == "TAB" and #o.shape.fields == 0 and m3.sql_schema(tostring(o.name)) then
+			if tab then
+				error(string.format(
+					"cannot determine input table (`%s' and `%s' both exist in db). Use `input' to set it explicitly.",
+					tab, o.name
+				))
+			end
+			tab = tostring(o.name)
 		end
 	end
-	return {
-		work     = work,
-		shutdown = input.close
-	}
+	return tab
 end
 
---------------------------------------------------------------------------------
+local function autoquery(tab)
+	if tab then
+		return {m3.sql("SELECT", "rowid"), m3.sql("FROM", tab)}
+	else
+		return "SELECT 0"
+	end
+end
+
+local workqueue = m3.shared_input()
+local putwork = m3.transaction():write(workqueue)
+
+local function build()
+	if global_config.tab == nil then global_config.tab = autotab() end
+	local query = m3.sql_statement(global_config.query or autoquery(global_config.tab))
+	local insn = m3.all { m3.any(global_config.insn), m3.commit }
+	local fp
+	m3.connect(workqueue, function(task)
+		m3.load(fp)
+		init(task)
+		m3.exec(insn)
+	end)
+	package.loaded.m3_simulate.run = function()
+		for row in query:rows() do
+			putwork(row:int(0))
+		end
+	end
+	return function()
+		fp = m3.save()
+	end
+end
 
 return {
-	host      = host,
-	init      = init,
-	testhooks = testhooks,
-	command   = command,
+	cmd   = cmd,
+	build = build
 }

@@ -2,14 +2,16 @@
 
 #if M3_LINUX
 
+#define _GNU_SOURCE /* for sched_getaffinity */
+
 #include "def.h"
-#include "mp.h"
 
 #include <lua.h>
 
 #include <assert.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -27,12 +29,6 @@
 #define spin_pause()        ((void)0)
 #endif
 
-// one for main process, worker id [2..n+1] for worker processes
-uint16_t m3__mp_proc_id = 1;
-#if M3_LUADEF
-CDEF uint16_t m3__mp_proc_id;
-#endif
-
 // memory allocator settings
 #define MP_HEAP_NUMCLS       28
 #define MP_HEAP_MINCLS       4 // 2^4 = 16 = sizeof(m3_Future)
@@ -41,7 +37,7 @@ CDEF uint16_t m3__mp_proc_id;
 #define MP_PARK_EMPTY        0
 #define MP_PARK_NOTIFIED     1
 
-#define FUT_COMPLETED        (-1)
+#define FUT_COMPLETED        (-1ull)
 
 #define MUTEX_UNLOCKED       0
 #define MUTEX_LOCKED         1
@@ -59,8 +55,6 @@ CDEF typedef struct m3_Future {
 	uint64_t state; // -1: completed, otherwise: pending
 	uint64_t data;  // must be unsigned for Lua
 } m3_Future;
-
-CDEF typedef struct m3_Shared m3_Shared;
 
 CDEF typedef struct m3_Heap {
 	uintptr_t cursor;
@@ -319,6 +313,20 @@ CDEFFUNC void m3__mp_msg_sweep(m3_Heap *heap, m3_Message **messages, size_t num)
 	}
 }
 
+/* ---- Futures ------------------------------------------------------------- */
+
+// this load synchronizes with stores to `fut->state` that also store to `fut->data`.
+// only writes that both:
+//   (1) store to `fut->data`,
+//   (2) wake up our process (ie. originate from a different process)
+// use an atomic (release) store. other writes don't use atomic stores.
+// therefore, after this function returns true, the *only* assumption you may make
+// is that you can read `fut->data`.
+CDEFFUNC int m3__mp_future_completed(m3_Future *fut)
+{
+	return __atomic_load_n(&fut->state, __ATOMIC_ACQUIRE) == FUT_COMPLETED;
+}
+
 /* ---- Events -------------------------------------------------------------- */
 
 CDEF typedef struct m3_Event {
@@ -357,8 +365,8 @@ CDEFFUNC void m3__mp_event_set(m3_Event *event, uint32_t flag)
 	m3__mp_mutex_unlock(&event->lock);
 	while (fut) {
 		uintptr_t info = fut->state;
-		fut->state = FUT_COMPLETED;
 		fut->data = flag;
+		__atomic_store_n(&fut->state, FUT_COMPLETED, __ATOMIC_RELEASE);
 		mp_proc_unpark(mp_owner(fut));
 		fut = (m3_Future *) info;
 	}
@@ -454,8 +462,8 @@ again:
 					// no atomic needed here: the future is synchronized by unpark.
 					queue->slots[idx].stamp = write+mask+1;
 					// forward the value to `rfut`.
-					rfut->state = FUT_COMPLETED;
 					rfut->data = data;
+					__atomic_store_n(&rfut->state, FUT_COMPLETED, __ATOMIC_RELEASE);
 					mp_proc_unpark(mp_owner(rfut));
 					return;
 				}
@@ -558,6 +566,8 @@ again:
 					// because we need to synchronize queue->slots[idx].data
 					__atomic_store_n(&queue->slots[idx].stamp, read+mask+2, __ATOMIC_RELEASE);
 					// forward the empty slot to `wfut`.
+					// this does not need release, or even an atomic store, because there is no
+					// data in the future that the other process might read.
 					wfut->state = FUT_COMPLETED;
 					mp_proc_unpark(mp_owner(wfut));
 					return;
@@ -607,37 +617,28 @@ again:
 	}
 }
 
-/* ---- Fork ---------------------------------------------------------------- */
+/* ---- System -------------------------------------------------------------- */
 
-// this has to be a C function to ensure that under no circumstance
-// the forked process may return from this function.
-// (eg. a lua error causing lua_pcall to return)
-//
-// takes as parameter the main function to the forked worker.
-// returns pid or nil in the case of error in the main process.
-int m3_mp_fork(lua_State *L)
+CDEFFUNC int m3__mp_fork(void)
 {
 	pid_t pid = fork();
-	if (pid < 0) {
-		// error
-		lua_pushnil(L);
-	} else if (pid > 0) {
-		// main proc
-		lua_pushnumber(L, pid);
-	} else {
-		// this is the worker process.
+	if (!pid)
 		prctl(PR_SET_PDEATHSIG, SIGTERM);
-		int r = lua_pcall(L, 0, 1, 0);
-		exit(r ? -1 : lua_tonumber(L, -1));
-	}
-	return 1;
+	return pid;
 }
-
-/* ---- Wait ---------------------------------------------------------------- */
 
 CDEFFUNC int m3__mp_reap(int pid)
 {
 	return waitpid(pid, NULL, WNOHANG);
+}
+
+CDEFFUNC int m3__mp_num_cpus(void)
+{
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	if (sched_getaffinity(0, sizeof(set), &set))
+		return 1;
+	return CPU_COUNT(&set);
 }
 
 /* -------------------------------------------------------------------------- */

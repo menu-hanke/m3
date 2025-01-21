@@ -4,3 +4,6 @@
 [submodule "fhk5"]
 	path = fhk5
 	url = https://github.com/menu-hanke/fhk5
+[submodule "sqlite"]
+	path = sqlite
+	url = https://github.com/sqlite/sqlite

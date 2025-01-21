@@ -5,7 +5,7 @@ local ffi = require "ffi"
 local buffer = require "string.buffer"
 require "table.new"
 
-local iswritable, scratch, stack, tmp = mem.iswritable, mem.scratch, mem.stack, mem.tmp
+local iswritable, scratch, arena = mem.iswritable, mem.scratch, mem.arena
 local tonumber, type = tonumber, type
 local C, alignof, cast, ffi_copy, ffi_fill, sizeof, typeof = ffi.C, ffi.alignof, ffi.cast, ffi.copy, ffi.fill, ffi.sizeof, ffi.typeof
 local band, bor, lshift, rshift = bit.band, bit.bor, bit.lshift, bit.rshift
@@ -163,7 +163,7 @@ local function vec_append(vec, x)
 		local cap = max(2*vec.cap, 8)
 		vec.cap = cap
 		local size = vec["m3$size"]
-		vec.data = stack:xrealloc(vec.data, size*idx, size*cap, vec["m3$align"])
+		vec.data = arena:xrealloc(vec.data, size*idx, size*cap, vec["m3$align"])
 	end
 	vec.data[idx] = x
 end
@@ -177,7 +177,7 @@ local function vec_alloc(vec, n)
 		repeat cap = cap*2 until cap >= num
 		vec.cap = cap
 		local size = vec["m3$size"]
-		vec.data = stack:xrealloc(vec.data, size*idx, size*cap, vec["m3$align"])
+		vec.data = arena:xrealloc(vec.data, size*idx, size*cap, vec["m3$align"])
 	end
 	return idx
 end
@@ -185,14 +185,14 @@ end
 local function vec_mutate(vec, realloc)
 	if realloc or not iswritable(vec.data) then
 		local size = vec["m3$size"]
-		vec.data = stack:xrealloc(vec.data, size*vec.num, size*vec.cap, vec["m3$align"])
+		vec.data = arena:xrealloc(vec.data, size*vec.num, size*vec.cap, vec["m3$align"])
 	end
 end
 
 local function vec_write(vec, realloc)
 	if realloc or not iswritable(vec.data) then
 		local size = vec["m3$size"]
-		vec.data = stack:xbump(size*vec.cap, vec["m3align"])
+		vec.data = arena:xbump(size*vec.cap, vec["m3align"])
 	end
 end
 
@@ -228,6 +228,13 @@ local function buildcopylist(idx, num)
 	return nnum, rshift(top - scratch.cursor, 3)
 end
 
+-- temporary scratch space to prevent some allocations
+local tmp = ffi.new [[
+	struct {
+		int64_t i64;
+	}
+]]
+
 local function vec_clear(vec, idx)
 	if idx == nil then
 		vec.num = 0
@@ -240,8 +247,8 @@ local function vec_clear(vec, idx)
 		local num, nc = buildcopylist(idx, vec.num)
 		vec.num = num
 		if nc > 0 then
-			if C.m3__mem_copy_list1(stack, scratch.cursor, nc, size, align, vec) < 0 then
-				stack:oom()
+			if C.m3__mem_copy_list1(arena, scratch.cursor, nc, size, align, vec) < 0 then
+				arena:oom()
 			end
 		end
 		scratch.cursor = tmp.i64
@@ -304,7 +311,7 @@ local function df_allocfunc(cols)
 	local buf = buffer.new()
 	buf:put([[
 		local max = math.max
-		local stack = ...
+		local arena = ...
 		return function(df, n)
 			local idx, cap = df.num, df.cap
 			local num = idx + (n or 1)
@@ -316,7 +323,7 @@ local function df_allocfunc(cols)
 	]])
 	for _,col in ipairs(cols) do
 		buf:putf(
-			"df.%s = stack:xrealloc(df.%s, %d*idx, %d*cap, %d)\n",
+			"df.%s = arena:xrealloc(df.%s, %d*idx, %d*cap, %d)\n",
 			col.name, col.name, sizeof(col.ctype), sizeof(col.ctype), alignof(col.ctype)
 		)
 	end
@@ -325,7 +332,7 @@ local function df_allocfunc(cols)
 			return idx
 		end
 	]])
-	return assert(load(buf))(stack)
+	return assert(load(buf))(arena)
 end
 
 local function embedconst(k)
@@ -386,8 +393,8 @@ local function df_clear(df, idx)
 		local num, nc = buildcopylist(idx, df.num)
 		df.num = num
 		if nc > 0 then
-			if C.m3__mem_copy_list(stack, scratch.cursor, nc, proto, df) < 0 then
-				stack:oom()
+			if C.m3__mem_copy_list(arena, scratch.cursor, nc, proto, df) < 0 then
+				arena:oom()
 			end
 		end
 		scratch.cursor = tmp.i64
@@ -398,7 +405,7 @@ local function df_mutate(df, col, realloc)
 	if realloc or not iswritable(df[col]) then
 		local size = df["m3$size"][col]
 		local align = df["m3$align"][col]
-		df[col] = stack:xrealloc(df[col], size*df.num, size*df.cap, align)
+		df[col] = arena:xrealloc(df[col], size*df.num, size*df.cap, align)
 	end
 end
 
@@ -406,7 +413,7 @@ local function df_write(df, col, realloc)
 	if realloc or not iswritable(df[col]) then
 		local size = df["m3$size"][col]
 		local align = df["m3$align"][col]
-		df[col] = stack:xbump(size*df.cap, align)
+		df[col] = arena:xbump(size*df.cap, align)
 	end
 end
 
@@ -444,6 +451,9 @@ local function df_addcolsfunc(cols)
 end
 
 local function df_extend(df, tab, num)
+	-- TODO: this should handle missing fields:
+	--   * set to dummy if not given,
+	--   * error if no dummy specified
 	if num or (tab[1] == nil) then
 		return df:addcols(tab, num)
 	else

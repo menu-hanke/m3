@@ -1,32 +1,35 @@
 local cdef = require "m3_cdef"
 local constify = require "m3_constify"
-local debugevent = require("m3_debug").event
 local environment = require "m3_environment"
+local shutdown = require "m3_shutdown"
 local ffi = require "ffi"
 local C, cast, ffi_copy, typeof, sizeof, alignof, intptr_t, voidptr = ffi.C, ffi.cast, ffi.copy, ffi.typeof, ffi.sizeof, ffi.alignof, ffi.typeof("intptr_t"), ffi.typeof("void *")
 local band, bnot, tonumber = bit.band, bit.bnot, tonumber
+local event = require("m3_debug").event
 
----- Mmap stacks ---------------------------------------------------------------
+local VMSIZE = environment.stack or cdef.M3_VMSIZE_DEFAULT
+
+---- Mmap arenas ---------------------------------------------------------------
 
 local function oom()
-	error("stack mapping out of memory")
+	error("arena mapping out of memory")
 end
 
-local function stack_bump(stack, size, align)
-	local cursor = band(stack.cursor-size, cast(intptr_t, -align))
-	stack.cursor = cursor
-	if cursor < stack.base then
-		stack:expand()
+local function arena_bump(arena, size, align)
+	local cursor = band(arena.cursor-size, cast(intptr_t, -align))
+	arena.cursor = cursor
+	if cursor < arena.base then
+		arena:expand()
 	end
 	return cursor
 end
 
-local function stack_xbump(stack, size, align)
-	return (cast(voidptr, stack_bump(stack, size, align)))
+local function arena_xbump(arena, size, align)
+	return (cast(voidptr, arena_bump(arena, size, align)))
 end
 
-local function stack_xrealloc(stack, oldptr, oldsize, newsize, align)
-	local newptr = stack_xbump(stack, newsize, align)
+local function arena_xrealloc(arena, oldptr, oldsize, newsize, align)
+	local newptr = arena_xbump(arena, newsize, align)
 	if oldsize > 0 then
 		ffi_copy(newptr, oldptr, oldsize)
 	end
@@ -46,162 +49,142 @@ local function typeofptr(ctype)
 	return p
 end
 
-local function stack_new(stack, ctype)
+local function arena_new(arena, ctype)
 	ctype = typeof(ctype)
-	return (cast(typeofptr(ctype), stack_bump(stack, sizeof(ctype), alignof(ctype))))
+	return (cast(typeofptr(ctype), arena_bump(arena, sizeof(ctype), alignof(ctype))))
 end
 
-local function stack_newarray(stack, ctype, num)
+local function arena_newarray(arena, ctype, num)
 	ctype = typeof(ctype)
-	return (cast(typeofptr(ctype), stack_bump(stack, num*sizeof(ctype), alignof(ctype))))
+	return (cast(typeofptr(ctype), arena_bump(arena, num*sizeof(ctype), alignof(ctype))))
 end
 
-local stack_expand, stack_map, stack_unmap
+local arena_expand, arena_map, arena_unmap
 if cdef.M3_MEM_VIRTUALALLOC then
 
-	stack_map = function(stack, size)
-		stack.bottom = ffi.cast("intptr_t", C.m3__mem_map_stack(size))
-		stack.base = stack.bottom+size
-		stack.top = stack.base
-		stack.cursor = stack.base
+	arena_map = function(arena, size)
+		arena.bottom = ffi.cast("intptr_t", C.m3__mem_map_arena(size))
+		arena.base = arena.bottom+size
+		arena.top = arena.base
+		arena.cursor = arena.base
 	end
 
-	stack_expand = function(stack)
-		if C.m3__mem_grow(stack) ~= 0 then
+	arena_expand = function(arena)
+		if C.m3__mem_grow(arena) ~= 0 then
 			oom()
 		end
 	end
 
-	stack_unmap = function(stack)
-		C.m3__mem_unmap(cast(voidptr, stack.bottom))
+	arena_unmap = function(arena)
+		C.m3__mem_unmap(cast(voidptr, arena.bottom))
 	end
 else
 
-	stack_map = function(stack, size)
-		stack.base = ffi.cast("intptr_t", C.m3__mem_map_stack(size))
-		stack.top = stack.base+size
-		stack.cursor = stack.top
+	arena_map = function(arena, size)
+		arena.base = ffi.cast("intptr_t", C.m3__mem_map_arena(size))
+		arena.top = arena.base+size
+		arena.cursor = arena.top
 	end
 
-	stack_expand = oom
+	arena_expand = oom
 
-	stack_unmap = function(stack)
-		C.m3__mem_unmap(ffi.cast("void *", stack.base), stack.top - stack.base)
+	arena_unmap = function(arena)
+		C.m3__mem_unmap(ffi.cast("void *", arena.base), arena.top - arena.base)
 	end
 
 end
 
 ffi.metatype(
-	"m3_Stack",
+	"m3_Arena",
 	{
 		__index = {
 			oom      = oom,
-			bump     = stack_bump,
-			xbump    = stack_xbump,
-			xrealloc = stack_xrealloc,
-			new      = stack_new,
-			newarray = stack_newarray,
-			expand   = stack_expand,
-			map      = stack_map,
-			unmap    = stack_unmap
+			bump     = arena_bump,
+			xbump    = arena_xbump,
+			xrealloc = arena_xrealloc,
+			new      = arena_new,
+			newarray = arena_newarray,
+			expand   = arena_expand,
+			map      = arena_map,
+			unmap    = arena_unmap
 		}
 	}
 )
 
+local global_savestate = ffi.new("m3_SaveState")
+local global_scratch   = ffi.new("m3_Arena")
+
+global_savestate.arena:map(VMSIZE)
+global_scratch:map(VMSIZE)
+
+shutdown(function()
+	global_savestate.arena:unmap()
+	global_scratch:unmap()
+end)
+
 ---- Heap & savepoints ---------------------------------------------------------
 
 local heapsize = constify.new()
-
-local ss = ffi.gc(
-	ffi.new("m3_SaveState"),
-	function(self) self.stack:unmap() end
-)
-ss.stack:map(environment.stack)
-local sstop = ss.stack.top
-ss.base = ss.stack.top
-ss.stack:new("uint64_t")[0] = 0
-ss.mask = -1ull
+local sstop = global_savestate.arena.top
+global_savestate.base = global_savestate.arena.top
+global_savestate.arena:new("uint64_t")[0] = 0
+global_savestate.mask = -1ull
 
 local function dirty(mask)
-	return band(ss.mask, mask) ~= 0
+	return band(global_savestate.mask, mask) ~= 0
 end
 
 local function setmask(mask)
 	if dirty(mask) then
-		debugevent("mask", mask)
-		C.m3__mem_setmask(ss, mask)
+		event("mask", mask)
+		C.m3__mem_setmask(global_savestate, mask)
 	end
 end
 
-local anchor = setmetatable({}, {
-	__call = function(self, v)
-		self[v] = true
-		return v
-	end
-})
-
 local function setheap(ptr, blocksize, num)
-	ss.heap = anchor(ptr)
-	ss.blocksize = blocksize
+	global_savestate.heap = shutdown(ptr, "anchor")
+	global_savestate.blocksize = blocksize
 	constify.set(heapsize, blocksize*num)
 end
 
--- note: iswritable() only works for the main stack.
--- if it's needed for the scratch stack too, then map both together
+-- note: iswritable() only works for the main arena.
+-- if it's needed for the scratch arena too, then map both together
 local function iswritable(ptr)
-	return cast(intptr_t, ptr) < ss.base
+	return cast(intptr_t, ptr) < global_savestate.base
 end
 
+-- TODO: only save if it's dirty, otherwise return current savepoint
 local function mem_save()
-	local cursor = band(ss.stack.cursor, bnot(63))
+	local cursor = band(global_savestate.arena.cursor, bnot(63))
 	cursor = cursor - heapsize()
-	ss.stack.cursor = cursor-16
-	if ss.stack.cursor < ss.stack.base then
-		ss.stack:expand()
+	global_savestate.arena.cursor = cursor-16
+	if global_savestate.arena.cursor < global_savestate.arena.base then
+		global_savestate.arena:expand()
 	end
 	cast("uint64_t *", cursor)[-1] = -1ull
-	cast("intptr_t *", cursor)[-2] = ss.base
-	ss.base = cursor
-	ss.mask = -1ull
+	cast("intptr_t *", cursor)[-2] = global_savestate.base
+	global_savestate.base = cursor
+	global_savestate.mask = -1ull
 	local fp = tonumber(cursor-sstop)
-	debugevent("save", fp)
+	event("save", fp)
 	return fp
 end
 
+-- TODO: load-and-pop
 local function mem_load(fp)
-	debugevent("load", fp)
-	C.m3__mem_load(ss, sstop+fp)
+	event("load", fp)
+	C.m3__mem_load(global_savestate, sstop+fp)
 end
-
----- Scratch management --------------------------------------------------------
-
-local scratch = ffi.gc(ffi.new("m3_Stack"), function(self) self:unmap() end)
-scratch:map(environment.stack)
-
-local scratch_top = scratch.top
-local function resetx()
-	scratch.cursor = scratch_top
-end
-
--- temporary scratch space to prevent some allocations
-local tmp = ffi.new [[
-	struct {
-		int64_t i64;
-	}
-]]
 
 --------------------------------------------------------------------------------
 
 return {
-	stack      = ss.stack,
-	scratch    = scratch,
-	resetx     = resetx,
-	tmp        = tmp,
-	setheap    = setheap,
-	iswritable = iswritable,
-	dirty      = dirty,
-	setmask    = setmask,
-	save       = mem_save,
-	load       = mem_load,
-	anchor     = anchor
+	arena        = global_savestate.arena,
+	scratch      = global_scratch,
+	setheap      = setheap,
+	iswritable   = iswritable,
+	dirty        = dirty,
+	setmask      = setmask,
+	save         = mem_save,
+	load         = mem_load,
 }

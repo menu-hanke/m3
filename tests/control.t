@@ -1,252 +1,218 @@
 -- vim: ft=lua
-local restree = tree()
-local result = {}
-connect(restree, function(x) table.insert(result, x) end)
+local m3 = require "m3"
 
-local writeres = write(restree)
-local function put(x)
-	return function() writeres(x) end
-end
+local current = cdata { ctype = "int32_t", init = 1 }
+local nodes = { {[0]="(root)"} }
 
-local function walk(tree, idx, node)
-	if idx >= 0 then
-		if tree.data[idx] ~= node.data then
-			error(string.format("wrong data at index %d: %s ~= %s", idx, node.data, tree.data[idx]))
+local putnode = transaction()
+	:mutate(current, function(current)
+		current[0] = math.max(current[0], #nodes)+1
+	end)
+	:call(function(current, value)
+		local idx = #nodes+1
+		nodes[idx] = {[0]=value}
+		table.insert(nodes[current], idx)
+	end, current, arg(1))
+
+local function node(value) return call(putnode, value) end
+
+local function check(result)
+	local errors = {}
+	for i=1, math.max(#nodes, #result) do
+		local have = nodes[i] and table.concat(nodes[i], ",", 0, #nodes[i]) or "nil"
+		local want = result[i] and table.concat(result[i], ",", 0, #result[i]) or "nil"
+		if have ~= want then
+			table.insert(errors, string.format(" * node %d: %s != %s", i, have, want))
 		end
 	end
-	local child = idx+1
-	for _,x in ipairs(node) do
-		if tree.link[child] ~= idx then
-			error(string.format("wrong topology at index %d: %d ~= %d", child, tree.link[child], idx))
-		end
-		child = walk(tree, child, x)
+	if #errors > 0 then
+		error(string.format("computed != true:\n%s", table.concat(errors, "\n")))
 	end
-	return child
 end
 
-local function check(root)
-	local tree = assert(result[1], "no tree")
-	local idx = walk(tree, -1, root)
-	assert(idx == tree.committed+1, "wrong tree size")
+local function flatten(flat, node)
+	local idx = #flat+1
+	if type(node) == "table" then
+		local n = { [0]=node[1] }
+		flat[idx] = n
+		for i=2, #node do
+			n[i-1] = flatten(flat, node[i])
+		end
+	else
+		flat[idx] = { [0]=node }
+	end
+	return idx
 end
 
---------------------------------------------------------------------------------
+local function tree(branches)
+	local flat = {}
+	flatten(flat, { "(root)", unpack(branches) })
+	return flat
+end
 
-test.simulate("control:all:empty", function()
-	exec(all {
-		all {},
-		put(1)
-	})
-	check { { data=1 } }
-end)
+local function case(name, insn, result)
+	if test(string.format("control:%s", name)) then
+		if type(insn) == "function" then
+			insn = insn()
+		end
+		simulate {
+			function()
+				m3.exec(all { insn, m3.commit })
+				check(result)
+			end
+		}
+	end
+end
 
-test.simulate("control:all:single", function()
-	exec(all {
-		put(1)
-	})
-	check { { data=1 } }
-end)
+case(
+	"all:empty",
+	all { all {}, node(1) },
+	tree { 1 }
+)
 
-test.simulate("control:all:chain", function()
-	exec(all {
-		put(1),
-		put(2)
-	})
-	check { { data=1, { data=2 } } }
-end)
+case(
+	"all:single",
+	all { node(1) },
+	tree { 1 }
+)
 
-test.simulate("control:any:empty", function()
-	exec(all {
-		any {},
-		put(1)
-	})
-	check {}
-end)
+case(
+	"all:chain",
+	all { node(1), node(2) },
+	tree { {1, 2} }
+)
 
-test.simulate("control:any:single", function()
-	exec(any {
-		put(1)
-	})
-	check { { data=1 } }
-end)
+case(
+	"any:single",
+	any { node(1) },
+	tree { 1 }
+)
 
-test.simulate("control:any:branch", function()
-	exec(all {
-		any {
-			put(1),
-			put(2),
-			put(3)
-		},
-		put(4)
-	})
-	check {
-		{ data=1, {data=4} },
-		{ data=2, {data=4} },
-		{ data=3, {data=4} }
-	}
-end)
+case(
+	"any:branch",
+	all { any { node(1), node(2), node(3) }, node(4) },
+	tree { {1, 4}, {2, 4}, {3, 4} }
+)
 
-test.simulate("control:nothing", function()
-	exec(all {
-		put(1),
-		nothing,
-		put(2)
-	})
-	check { {data=1, {data=2}} }
-end)
+case(
+	"any:empty-after",
+	all { any {}, node(1) },
+	tree {}
+)
 
--- TODO: cdata api (?)
--- test("control:optional", function()
--- 	local state = m3.cdata("struct { uint32_t bit; uint32_t value; }")
--- 	local wstate = write(state)
--- 	local rstate = read(state)
--- 	local seen = {}
--- 	local function toggle()
--- 		local s = wstate()
--- 		s.value = s.value+2^s.bit
--- 	end
--- 	local function nextbit()
--- 		local s = wstate()
--- 		s.bit = s.bit + 1
--- 	end
--- 	local function setseen() seen[rstate().value] = true end
--- 	simulate(function()
--- 		exec(all {
--- 			optional(toggle), nextbit,
--- 			optional(toggle), nextbit,
--- 			optional(toggle), nextbit,
--- 			setseen
--- 		})
--- 		for i=0, 7 do assert(seen[i]) end
--- 	end)
--- end)
+case(
+	"any:empty-before",
+	any { all { node(1), any {} } },
+	tree {}
+)
 
-test.simulate("control:skip", function()
-	exec(any {
-		all {
-			skip,
-			put(1)
-		},
-		put(2)
-	})
-	check { {data=2} }
-end)
+case(
+	"any:skip",
+	any { node(1), all { node(2), any {} }, node(3) },
+	tree { 1, 3 }
+)
 
-test.simulate("control:first:take-branch", function()
-	exec(first(any {
-		put(1),
-		put(2)
-	}))
-	check { {data=1} }
-end)
+case(
+	"nothing",
+	all { node(1), nothing, node(2) },
+	tree { {1, 2} }
+)
 
-test.simulate("control:first:skip-branch", function()
-	exec(first(any {
-		all { skip, put(1) },
-		put(2)
-	}))
-	check { {data=2} }
-end)
+case(
+	"optional",
+	function()
+		local state = cdata { ctype="struct { uint32_t bit; uint32_t value; }" }
+		local toggle = transaction():mutate(state, function(s) s.value = s.value+2^s.bit end)
+		local nextbit = transaction():mutate(state, function(s) s.bit = s.bit+1 end)
+		local getstate = transaction():read(state)
+		return all {
+			optional(toggle), nextbit,
+			optional(toggle), nextbit,
+			optional(toggle), nextbit,
+			function() putnode(getstate().value) end
+		}
+	end,
+	tree { 0b111, 0b011, 0b101, 0b001, 0b110, 0b010, 0b100, 0b000 }
+)
 
-test.simulate("control:first:nest", function()
-	exec(first(any {
-		skip,
-		first(any {
-			put(1),
-			put(2)
-		}),
-		put(3)
-	}))
-	check { {data=1} }
-end)
+case(
+	"skip",
+	any { all { skip, node(1) }, node(2) },
+	tree { 2 }
+)
 
-test.simulate("control:try", function()
-	exec(all {
-		try(all {
-			skip,
-			put(1)
-		}),
-		try(put(2))
-	})
-	check { {data=2} }
-end)
+case(
+	"first:take-branch",
+	first(any { node(1), node(2) }),
+	tree { 1 }
+)
 
--- see TODO in emit_loop_next
---test("control.loop", function()
---	instructions = all {
---		loop {
---			init = function() return {it=0} end,
---			next = function(state)
---				if state.it < 3 then
---					state.it = state.it + 1
---					tree(state.it)
---				else
---					return false
---				end
---			end
---		},
---		put("end")
---	}
---	sim()
---	check {
---		{ data=1, {data="end"} },
---		{ data=2, {data="end"} },
---		{ data=3, {data="end"} },
---	}
---end)
+case(
+	"first:skip-branch",
+	first(any { all { skip, node(1) }, node(2) }),
+	tree { 2 }
+)
 
-test.simulate("control:dynamic", function()
-	exec(all {
-		put(1),
-		dynamic(function()
-			return all { put(2) }
-		end)
-	})
-	check { { data=1, {data=2} } }
-end)
+case(
+	"first:nest",
+	first(any { skip, first(any { node(1), node(2) }), node(3) }),
+	tree { 1 }
+)
 
-test.simulate("control:callstack-overwrite", function()
-	local branch = all {
-		any {
-			all {},
+case(
+	"try",
+	all { try(all { skip, node(1) }), try(node(2)) },
+	tree { 2 }
+)
+
+case(
+	"dynamic",
+	all { node(1), dynamic(function() return all { node(2) } end) },
+	tree { {1, 2} }
+)
+
+case(
+	"callstack-overwrite",
+	function()
+		local branch = all {
+			any {
+				all {},
+				all {}
+			},
 			all {}
-		},
-		all {}
-	}
-	exec(all {
-		branch,
-		branch,
-		put(1)
-	})
-	check {
-		{data=1},
-		{data=1},
-		{data=1},
-		{data=1}
-	}
-end)
+		}
+		return all {
+			branch,
+			branch,
+			node(1)
+		}
+	end,
+	tree { 1, 1, 1, 1 }
+)
 
-test.simulate("control:deep-callstack", function()
-	local num = 0
-	local function inc() num = num+1 end
-	local branch = all {
-		any {
-			all {},
+case(
+	"deep-callstack",
+	function()
+		local branch = all {
+			any {
+				all {},
+				all {}
+			},
 			all {}
-		},
-		all {}
-	}
-	exec(all {
-		all {
+		}
+		return all {
 			all {
 				all {
 					all {
 						all {
-							branch,
-							branch,
-							branch,
-							branch,
-							inc
+							all {
+								branch,
+								branch,
+								branch,
+								branch,
+								node(1)
+							},
+							all {}
 						},
 						all {}
 					},
@@ -255,34 +221,30 @@ test.simulate("control:deep-callstack", function()
 				all {}
 			},
 			all {}
-		},
-		all {}
-	})
-	assert(num == 2^4)
-end)
+		}
+	end,
+	tree { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+)
 
-test.simulate("control:return-false", function()
-	exec(any {
-		all {
-			function() return false end,
-			put(1)
-		},
-		put(2)
-	})
-	check { {data=2} }
-end)
+case(
+	"return-false",
+	any { all { function() return false end, node(1) }, node(2) },
+	tree { 2 }
+)
 
-test.simulate("control:recursion", function()
+if test "control:recursion" then
 	local n = 0
-	local node = all {
+	local insn = all {
 		function()
-			if n == 10 then
-				return false
-			end
+			if n == 10 then return false end
 			n = n+1
 		end
 	}
-	table.insert(node.edges, node)
-	exec(node)
-	assert(n == 10)
-end)
+	table.insert(insn.edges, insn)
+	simulate {
+		function()
+			m3.exec(insn)
+			assert(n == 10)
+		end
+	}
+end

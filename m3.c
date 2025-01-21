@@ -1,16 +1,20 @@
-#include "m3.h"
 #include "target.h"
 
 #include <lua.h>
 #include <lualib.h>
 #include <lauxlib.h>
 #include <luajit.h>
+#include <sqlite3.h>
 
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// from libfhk.a
+int luaopen_fhk(lua_State *L);
+extern const char *fhk_VERSION;
 
 #define OPT_SCRIPT      '@'
 #define OPT_SCRIPTARG   '-'
@@ -29,8 +33,9 @@ typedef struct {
 
 typedef struct {
 	int argn;
+	int parallel;
+	int mem;
 	Arg *ap;
-	TestState *test;
 } SetupData;
 
 static void help(const char *progname)
@@ -40,12 +45,12 @@ static void help(const char *progname)
 			"    -O[opt]            Control LuaJIT optimizations.\n"
 			"    -j cmd             Perform LuaJIT control command.\n"
 #if M3_LINUX
-			"    -p num             Control parallelization (default: number of CPUs).\n"
+			"    -p num             Set number of worker processes (default: number of CPUs).\n"
 #endif
 			"    -l module          Load module.\n"
-			"    -i input           Set input.\n"
+			"    -d file[=name]     Attach database.\n"
 			"    -v[flags]          Verbose output.\n"
-			"    -m[region] num     Set max memory per region.\n"
+			"    -m[region] size    Set virtual memory mapping size.\n"
 			"    -t[tests]          Test the simulator.\n"
 			"    -V                 Show version.\n"
 			"    --                 Stop handling options. Remaining arguments are passed to scripts.\n",
@@ -55,7 +60,6 @@ static void help(const char *progname)
 
 static void version(void)
 {
-	extern const char *fhk_VERSION;
 	puts(
 			"m3 "
 #ifdef M3_GITVER
@@ -82,13 +86,15 @@ static void version(void)
 	puts(
 			LUAJIT_VERSION
 #ifdef LJ_GITVER
-			" "
+			" ("
 			LJ_GITVER
+			")"
 #endif
 	);
+	puts("SQLite " SQLITE_VERSION " (" SQLITE_SOURCE_ID ")");
 }
 
-static void parseargs(char **argv, SetupData *sd, m3_Init *init)
+static void parseargs(char **argv, SetupData *sd)
 {
 	Arg *ap = sd->ap;
 #define STRARG(o,v) do { ap->option = (o); ap->strv = (v); ap++; } while(0)
@@ -117,7 +123,7 @@ help:
 			case 'O': case 'v': case 't':
 				STRARG(f, argv[0]+2);
 				break;
-			case 'j': case 'p': case 'l': case 'i':
+			case 'j': case 'p': case 'l': case 'd':
 			{
 				const char *v = argv[0] + 2;
 				if (!*v) {
@@ -128,7 +134,7 @@ help:
 					}
 				}
 				if (M3_LINUX && f == 'p') {
-					init->parallel = strtoul(v, NULL, 10);
+					sd->parallel = strtoul(v, NULL, 10);
 				} else {
 					STRARG(f, v);
 				}
@@ -228,12 +234,6 @@ static int report(lua_State *L, int r)
 	return r;
 }
 
-static int errhandler(lua_State *L)
-{
-	traceback(L);
-	return report(L, 1);
-}
-
 static int require(lua_State *L, const char *name)
 {
 	lua_getglobal(L, "require");
@@ -241,7 +241,7 @@ static int require(lua_State *L, const char *name)
 	return pcalltb(L, 1, 1);
 }
 
-static void *testalloc(SetupData *sd, void *ptr, size_t osize, size_t nsize)
+static void *testalloc(TestState *ts, void *ptr, size_t osize, size_t nsize)
 {
 	if (!nsize)
 		// free: nop.
@@ -249,7 +249,6 @@ static void *testalloc(SetupData *sd, void *ptr, size_t osize, size_t nsize)
 	if (nsize <= osize)
 		// smaller realloc.
 		return ptr;
-	TestState *ts = sd->test;
 	intptr_t p = (ts->alloc_ptr + 7) & -8;
 	intptr_t np = p + nsize;
 	intptr_t end = ts->alloc_end;
@@ -277,22 +276,32 @@ static void *testalloc(SetupData *sd, void *ptr, size_t osize, size_t nsize)
 static int testfunc(lua_State *L)
 {
 	if (!lua_gettop(L)) {
-		/* test() => true */
+		// test() => true
 		lua_pushboolean(L, 1);
+	} else if (lua_isboolean(L, 1)) {
+		lua_State *T = lua_touserdata(L, lua_upvalueindex(1));
+		lua_getfield(T, LUA_REGISTRYINDEX, "seterr");
+		if (!lua_toboolean(L, 1)) {
+			// L: test(false, string) => T: set error pattern
+			lua_pushstring(T, luaL_checkstring(L, 2));
+			lua_call(T, 1, 0);
+			lua_pushboolean(L, 1);
+		} else {
+			// L: test(true) => skip
+			lua_pushliteral(T, "<skip>");
+			lua_call(T, 1, 0);
+			lua_pushliteral(L, "<skip>");
+			lua_error(L);
+		}
 	} else {
-		/* L: test(string) => T: test(string) */
-		lua_getfield(L, LUA_REGISTRYINDEX, "m3$T");
-		lua_State *T = lua_touserdata(L, -1);
-		lua_pop(L, 1);
+		// L: test(string) => T: test(string)
+		lua_State *T = lua_touserdata(L, lua_upvalueindex(1));
 		lua_getfield(T, LUA_REGISTRYINDEX, "test");
 		lua_pushstring(T, luaL_checkstring(L, 1));
 		lua_call(T, 1, 1);
-		int enabled = lua_toboolean(T, -1);
+		int on = lua_toboolean(T, -1);
 		lua_pop(T, 1);
-		/* L: call second arg */
-		if (enabled && lua_gettop(L) >= 2)
-			lua_call(L, 0, 0);
-		lua_pushboolean(L, enabled);
+		lua_pushboolean(L, on);
 	}
 	return 1;
 }
@@ -300,29 +309,16 @@ static int testfunc(lua_State *L)
 static int setup(lua_State *L)
 {
 	SetupData *setup = lua_touserdata(L, 1);
-	lua_pop(L, 1);
-	if (setup->test) {
-		// don't bother gcing, state will be thrown away soon anyway.
-		lua_gc(L, LUA_GCSTOP, 0);
-		// TODO: further speedup here: hook `require` and cache compiled bytecode.
-		lua_pushlightuserdata(L, setup->test->T);
-		lua_setfield(L, LUA_REGISTRYINDEX, "m3$T");
-		lua_pushcfunction(L, testfunc);
-		lua_setfield(L, LUA_REGISTRYINDEX, "m3$test");
-	}
-	if (require(L, "m3_api") || require(L, "m3_simulate"))
+	if (require(L, "m3_simulate"))
 		lua_error(L);
-	/* stack:
-	 *   1: m3 api
-	 *   2: simulate */
 	Arg *ap = setup->ap;
 	for (int i=0; i<setup->argn; i++, ap++) {
 		switch (ap->option) {
 			case OPT_SCRIPT:
 			{
-				lua_getfield(L, 2, "init");
-				lua_pushstring(L, ap->strv);
-				int narg = 1;
+				if (luaL_loadfile(L, ap->strv))
+					lua_error(L);
+				int narg = 0;
 				for (int j=i+1; j<setup->argn; j++) {
 					Arg *aj = &setup->ap[j];
 					if (aj->option == OPT_SCRIPTARG) {
@@ -336,28 +332,58 @@ static int setup(lua_State *L)
 			case OPT_SCRIPTARG:
 				return 0;
 			default:
-				lua_getfield(L, 2, "command");
+				lua_getfield(L, 2, "cmd");
 				lua_pushlstring(L, &ap->option, 1);
 				lua_pushstring(L, ap->strv);
 				lua_call(L, 2, 0);
 				break;
 		}
 	}
-	lua_getfield(L, 2, "host");
+	lua_getfield(L, 2, "build");
 	lua_call(L, 0, 1);
 	return 1;
 }
 
-static int runtests(m3_Init *init)
+static int setupstate(lua_State *L, SetupData *sd)
 {
-	init->alloc = (lua_Alloc) testalloc;
+	luaL_openlibs(L);
+	luaL_loadstring(L,
+		"local luaopen_fhk, setup, udata, parallel = ...\n"
+		"package.loaded.fhk = luaopen_fhk()\n"
+		"package.loaded.m3_environment = {\n"
+		  "init = function() return setup(udata) end,\n"
+		  "parallel = parallel == -1 and 'auto' or (parallel > 0 and parallel),\n"
+		"}\n"
+		"require 'm3'\n"
+		"return require('m3_simulate').run\n"
+	);
+	lua_pushcfunction(L, luaopen_fhk);
+	lua_pushcfunction(L, setup);
+	lua_pushlightuserdata(L, sd);
+	lua_pushinteger(L, sd->parallel);
+	return pcalltb(L, 4, 1);
+}
+
+static int waitworkers(lua_State *L)
+{
+	int r;
+	if (((r = require(L, "m3"))) == LUA_OK) {
+		lua_getfield(L, -1, "wait");
+		r = pcalltb(L, 0, 0);
+	}
+	return r;
+}
+
+static const char *TESTREG[] = { "more", "seterr", "test", "fail" };
+
+static int runtests(SetupData *sd)
+{
 	lua_State *T = luaL_newstate();
 	if (!T) return -1;
 	luaL_openlibs(T);
 	lua_settop(T, 0);
 	if (report(T, require(T, "m3_test")))
 		return -1;
-	SetupData *sd = init->ud;
 	for (int i=0; i<sd->argn; i++) {
 		Arg *ap = &sd->ap[i];
 		if (ap->option == 't') {
@@ -366,58 +392,57 @@ static int runtests(m3_Init *init)
 			lua_call(T, 1, 0);
 		}
 	}
-	lua_getfield(T, 1, "more");
-	lua_setfield(T, LUA_REGISTRYINDEX, "more");
-	lua_getfield(T, 1, "test");
-	lua_setfield(T, LUA_REGISTRYINDEX, "test");
-	lua_getfield(T, 1, "fail");
-	lua_setfield(T, LUA_REGISTRYINDEX, "fail");
+	for (size_t i=0; i<sizeof(TESTREG)/sizeof(TESTREG[0]); i++) {
+		lua_getfield(T, 1, TESTREG[i]);
+		lua_setfield(T, LUA_REGISTRYINDEX, TESTREG[i]);
+	}
 	lua_pop(T, 1);
 	TestState test;
 	test.T = T;
 	test.alloc_base = (intptr_t) malloc(1024*1024);
 	test.alloc_end = test.alloc_base + 1024*1024;
-	sd->test = &test;
 	for (;;) {
 		lua_getfield(T, LUA_REGISTRYINDEX, "more");
 		lua_call(T, 0, 1);
 		if (!lua_toboolean(T, -1)) {
 			lua_close(T);
-			return 0;
+			return EXIT_SUCCESS;
 		}
 		test.alloc_ptr = test.alloc_base;
-		lua_State *L = m3_newstate(init);
-		if (!L) return -1;
-		m3_pushrun(L);
-		if (pcalltb(L, 0, 0)) {
+		lua_State *L = lua_newstate((lua_Alloc) testalloc, &test);
+		if (!L) return EXIT_FAILURE;
+		lua_gc(L, LUA_GCSTOP, 0);
+		lua_pushlightuserdata(L, T);
+		lua_pushcclosure(L, testfunc, 1);
+		lua_setglobal(L, "test");
+		if (setupstate(L, sd) || pcalltb(L, 0, 0) || waitworkers(L)) {
 			lua_getfield(T, LUA_REGISTRYINDEX, "fail");
 			lua_pushstring(T, lua_tostring(L, -1));
 			lua_call(T, 1, 0);
 		}
-		m3_close(L);
+		lua_close(L);
 	}
 }
 
 int main(int argc, char **argv)
 {
-	SetupData sd = {0};
-	m3_Init init = {
-		.setup = setup,
-		.ud = &sd,
-		.err = errhandler,
-		.parallel = -1
+	SetupData sd = {
+		.argn = 0,
+		.parallel = -1,
+		.mem = -1,
 	};
 	Arg ap[argc];
 	sd.ap = ap;
-	parseargs(argv, &sd, &init);
+	parseargs(argv, &sd);
 	for (int i=0; i<sd.argn; i++) {
 		if (sd.ap[i].option == 't')
-			 return runtests(&init);
+			 return runtests(&sd);
 	}
-	lua_State *L = m3_newstate(&init);
-	if (!L) return -1;
-	m3_pushrun(L);
-	if (report(L, pcalltb(L, 0, 0))) return -1;
-	m3_close(L);
-	return 0;
+	lua_State *L = luaL_newstate();
+	if (!L) return EXIT_FAILURE;
+	int r = report(L, setupstate(L, &sd))
+		|| report(L, pcalltb(L, 0, 0))
+		|| report(L, waitworkers(L));
+	lua_close(L);
+	return r;
 }

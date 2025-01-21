@@ -2,8 +2,6 @@ local environment = require "m3_environment"
 local ffi = require "ffi"
 local buffer = require "string.buffer"
 
-local C = ffi.C
-
 local colorterm = (function()
 	local term = os.getenv("TERM")
 	return (term and term:match("color")) or os.getenv("COLORTERM") ~= nil
@@ -21,28 +19,20 @@ local function trace_plain(s)
 	io.stderr:write(s.."\n")
 end
 
-local trace
-if environment.mode == "mp" then
-	if colorterm then
-		trace = function(s)
-			local id = C.m3__mp_proc_id
-			if id > 1 then
-				local c = ((id-2)%(#proccolor+1))
-				s = string.format("[%s%d\x1b[0m] %s", proccolor[c], id-1, s)
+local trace = trace_plain
+if environment.parallel then
+	require("m3_mp").proc_init(function(id)
+		if colorterm and id>0 then
+			trace = function(s)
+				local c = id%(#proccolor+1)
+				trace_plain(string.format("[%s%d\x1b[0m] %s", proccolor[c], id, s))
 			end
-			trace_plain(s)
-		end
-	else
-		trace = function(s)
-			local id = C.m3__mp_proc_id
-			if id > 1 then
-				s = string.format("[%d] %s", id-1, s)
+		else
+			trace = function(s)
+				trace_plain(string.format("[%d] %s", id, s))
 			end
-			trace_plain(s)
 		end
-	end
-else
-	trace = trace_plain
+	end)
 end
 
 ---- pretty printing -----------------------------------------------------------
@@ -204,8 +194,7 @@ local function vpretty(flags, sep, ...)
 	for i=1, select("#", ...) do
 		if i > 1 and sep then buf:put(sep) end
 		local x = select(i, ...)
-		-- special case: top-level strings are printed as-is
-		if type(x) == "string" then
+		if type(x) == "string" and flags:match("t") then
 			buf:put(x)
 		else
 			putpp(select(i, ...), buf, "", fmt, {})
@@ -215,17 +204,27 @@ local function vpretty(flags, sep, ...)
 end
 
 local function pprint(...)
-	trace(vpretty(select("#", ...) > 1 and "s" or "sni", "\t", ...))
+	trace(vpretty(select("#", ...) > 1 and "st" or "stni", "\t", ...))
 end
 
 ---- trace messages ------------------------------------------------------------
 
-local function trace_data(D)
-	trace(string.format("DATA  %s", pretty(D.data, "sni")))
+local function trace_data(objs)
+	local buf = buffer.new()
+	local fmt = flags2fmt("sni")
+	fmt.short = true
+	for _,o in ipairs(objs) do
+		buf:put("DATA  ")
+		putpp(o.obj, buf, "", fmt, {})
+		if o.map then
+			fmt.putcolor(buf, string.format(" -> %s", o.map), "tabkey")
+		end
+		trace(buf:get())
+	end
 end
 
 local function fpfmt(fp)
-	return -fp, require("m3_mem").stack.top+fp
+	return -fp, require("m3_mem").arena.top+fp
 end
 
 local function trace_save(fp)
@@ -234,35 +233,6 @@ end
 
 local function trace_load(fp)
 	trace(string.format("LOAD  0x%x (0x%x)", fpfmt(fp)))
-end
-
-local function caller(level)
-	local info = debug.getinfo(level, "Sl")
-	return string.format("%s:%d", info.short_src, info.currentline)
-end
-
-local function trace_read(...)
-	-- NOTE: caller level here (and trace_write) depends on the wrappers in access
-	trace(string.format("READ  %s -> %s", caller(4), vpretty("", "\t", ...)))
-end
-
-local function trace_write(...)
-	trace(string.format("WRITE %s -> %s", caller(4), vpretty("", "\t", ...)))
-end
-
-local function trace_apply(ap)
-	local buf = buffer.new()
-	buf:put("APPLY ")
-	local fmt = flags2fmt("")
-	local comma = ""
-	for k,v in pairs(ap.sub) do
-		buf:put(comma)
-		comma = "\t"
-		putpp(k, buf, "", fmt, {})
-		buf:put("<-")
-		putpp(v, buf, "", fmt, {})
-	end
-	trace(tostring(buf))
 end
 
 local function mask2str(mask)
@@ -279,62 +249,58 @@ local function trace_mask(mask)
 	trace(string.format("MASK  {%s}", mask2str(mask)))
 end
 
+local function trace_sql(stmt, ...)
+	trace(string.format("SQL   %s %s", stmt:sql(), vpretty("s", "\t", ...)))
+end
+
 local trace_events = {
 	data  = { mask="d", func=trace_data },
 	save  = { mask="s", func=trace_save },
 	load  = { mask="s", func=trace_load },
 	mask  = { mask="s", func=trace_mask },
-	read  = { mask="r", func=trace_read },
-	write = { mask="w", func=trace_write },
-	apply = { mask="a", func=trace_apply }
+	sql   = { mask="q", func=trace_sql  }
 }
 
-local TRACE_ALL = "dsrwa"
-local trace_dispatch = {}
+local TRACE_ALL = "dsq"
 
-local function trace_off() end
-
-local function trace_on(flags)
+local function dispatch_on(flags)
 	if flags == true then flags = TRACE_ALL end
-	local target = setmetatable({}, {__index=function() return trace_off end})
+	local target = setmetatable({}, {__index=function() return false end})
 	for event,def in pairs(trace_events) do
 		if flags:match(def.mask) then
 			target[event] = def.func
 		end
 	end
-	trace_dispatch = ffi.metatype("struct {}", {__index=target})
-	return load([[
-		local dispatch = ...
-		return function(event, ...) return dispatch[event](...) end
-	]])(trace_dispatch)
+	return ffi.metatype("struct {}", {__index=target})
 end
 
-local event = load([[
-	local target = ...
-	return function(...) return target(...) end
-]])(trace_off)
+local dispatch_off = ffi.metatype("struct {}", { __index = function() return false end })
+
+local event, enabled = load([[
+	local dispatch = ...
+	return function(event, ...)
+		local func = dispatch[event]
+		if func then return func(...) end
+	end, function(event) return dispatch[event] end
+]])(dispatch_off)
 
 local function settrace(flags)
 	local target
 	if flags then
-		target = trace_on(flags)
+		target = dispatch_on(flags)
 	else
-		target = trace_off
+		target = dispatch_off
 	end
 	debug.setupvalue(event, 1, target)
-end
-
-local function gettrace(event)
-	local f = trace_dispatch[event]
-	if f and f ~= trace_off then return f end
+	debug.setupvalue(enabled, 1, target)
 end
 
 --------------------------------------------------------------------------------
 
 return {
-	settrace = settrace,
-	gettrace = gettrace,
+	trace    = settrace,
 	event    = event,
+	enabled  = enabled,
 	putpp    = putpp,
 	pretty   = pretty,
 	pprint   = pprint

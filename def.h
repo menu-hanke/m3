@@ -48,11 +48,8 @@ typedef m3_MRef MRef;
 #define mrefp(b,r) (((void*)(b)) + (ptrdiff_t)(r))  // mem ref to pointer
 #define pmref(b,p) ((intptr_t)(p) - (intptr_t)(b))  // pointer to mem ref
 
-#define VMSIZE_HUGE          (1ULL<<31)
-#define VMSIZE_DEFAULT       VMSIZE_HUGE
-
-// this is 1ULL<<32, but it must be written in a form that luajit can parse.
-#define VMSIZE_PROC          0x100000000ull
+#define VMSIZE_PROC 0x100000000ull
+LUADEF(cdef.M3_VMSIZE_DEFAULT = 0x80000000) // must fit in 32 bits
 LUADEF(cdef.M3_VMSIZE_PROC = VMSIZE_PROC)
 
 #if M3_VIRTUALALLOC

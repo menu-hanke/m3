@@ -26,7 +26,12 @@ local function ident(name)
 	return name
 end
 
+local function isfp(ctype)
+	return ffi.istype("double", ctype) or ffi.istype("float", ctype)
+end
+
 return {
 	dummy = dummy,
-	ident = ident
+	ident = ident,
+	isfp  = isfp
 }

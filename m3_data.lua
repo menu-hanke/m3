@@ -1,13 +1,18 @@
 local array = require "m3_array"
 local cdata = require "m3_cdata"
 local cdef = require "m3_cdef"
-local de = require "m3_debug"
+local code = require "m3_code"
+local dbg = require "m3_debug"
 local environment = require "m3_environment"
 local mem = require "m3_mem"
+local shutdown = require "m3_shutdown"
+local sqlite = require "m3_sqlite"
 local fhk = require "fhk"
 local buffer = require "string.buffer"
 local ffi = require "ffi"
 require "table.clear"
+
+local event, enabled = dbg.event, dbg.enabled
 
 local G = fhk.newgraph()
 
@@ -15,7 +20,7 @@ local D = {
 	transactions   = {},
 	mapping        = {}, -- node -> data
 	mapping_tables = {}, -- list of table nodes (rebuilt each iteration)
-	expr           = {}
+	expr           = {},
 }
 
 -- note: consider implementing this in fhk itself? either in the language or query api.
@@ -31,6 +36,47 @@ local function gettag(x)
 	return mt and mt["m3$tag"]
 end
 
+local function pretty(o, buf, _, fmt)
+	local tag = gettag(o)
+	local putcolor = fmt.putcolor
+	putcolor(
+		buf,
+		string.format(
+			"<%s[%s%s]> ",
+			tag,
+			o.read and "r" or "-",
+			o.write and "w" or "-"
+		),
+		"special"
+	)
+	if tag == "memslot" then
+		buf:put(tostring(o.ctype))
+		if o.ptr then
+			buf:putf(" [0x%x]", ffi.cast("intptr_t", o.ptr))
+		end
+		if o.block then
+			buf:putf(" (block %d)", o.block)
+		end
+	elseif tag == "column" then
+		buf:put(tostring(o.ctype))
+		if o.df.slot.ptr then
+			buf:putf(" [0x%x]", ffi.cast("intptr_t", o.df.slot.ptr)
+				+ ffi.offsetof(o.df.slot.ctype, o.name))
+		end
+	elseif tag == "struct" then
+		if not fmt.short then
+			return o.fields
+		end
+	elseif tag == "dataframe" then
+		if o.slot.block then
+			buf:putf("(block %d) ", o.slot.block)
+		end
+		if not fmt.short then
+			return o.columns
+		end
+	end
+end
+
 local function newmeta(tag)
 	return { ["m3$tag"] = tag, ["m3$pretty"] = pretty }
 end
@@ -43,8 +89,8 @@ end
 
 -- collection of named objects
 local struct_mt = newmeta "struct"
-local function struct()
-	return setmetatable({ fields = {}  }, struct_mt)
+local function struct(fields)
+	return setmetatable({ fields = fields or {}  }, struct_mt)
 end
 
 -- dataframe column
@@ -56,9 +102,12 @@ end
 local function dataframe_ctype(df)
 	local proto = {}
 	for name,col in pairs(df.columns) do
-		if col.mark then -- set in memlayout
+		if col.mark then
 			col.ctype = ffi.typeof(col.ctype or "double")
-			table.insert(proto, {name=name, ctype=col.ctype})
+			if col.dummy == true then
+				col.dummy = cdata.dummy(col.ctype)
+			end
+			table.insert(proto, {name=name, ctype=col.ctype, dummy=col.dummy})
 		end
 	end
 	return array.df_of(proto)
@@ -123,6 +172,18 @@ local function expr(e)
 	return expr
 end
 
+-- sql DML
+local dml_mt = newmeta "dml"
+local function dml(sql, n)
+	return setmetatable({sql=sql, n=n}, dml_mt)
+end
+
+-- orm-style automagic sql SELECT
+local autoselect_mt = newmeta "autoselect"
+local function autoselect(obj, tab, sql)
+	return setmetatable({obj=obj, tab=tab, sql=sql}, autoselect_mt)
+end
+
 -- pipe
 local pipe_mt = newmeta "pipe"
 local function pipe()
@@ -130,35 +191,52 @@ local function pipe()
 end
 
 -- user
-local dynamic_mt = newmeta "dynamic"
-local function dynamic(obj)
-	return setmetatable(obj or {}, dynamic_mt)
+local func_mt = newmeta "func"
+local function func(func, args)
+	return setmetatable({func=func, args=args}, func_mt)
+end
+local function call(func, n, buf)
+	return setmetatable({func=func, n=n, buf=buf}, func_mt)
 end
 
-local function func(f)
-	return dynamic {
-		writer = function() return f end,
-		reader = function() return f end
-	}
+-- buffer
+local buf_mt = newmeta "buf"
+local function databuf()
+	return setmetatable({
+		tail = memslot { ctype="int32_t", init=0 },
+		state = { [0]=0 }
+	}, buf_mt)
 end
 
+-- TODO: use table dispatch here
 local function visit(o, f, ...)
 	local tag = gettag(o)
+	f(o, ...)
 	if tag == "struct" then
 		return visit(o.fields, f, ...)
 	elseif tag == "dataframe" then
-		f(o.slot, ...)
+		visit(o.slot, f, ...)
 		return visit(o.columns, f, ...)
 	elseif tag == "size" then
-		f(o.data, ...)
+		return f(o.data, ...)
 	elseif tag == "splat" then
 		return visit(o.values, f, ...)
 	elseif tag == "mutate" then
 		return visit(o.data, f, ...)
+	elseif tag == "dml" then
+		return visit(D.actions, f, ...)
+	elseif tag == "autoselect" then
+		return visit(o.obj, f, ...)
 	elseif tag == "pipe" then
-		visit(o.sink, f, ...)
-	elseif tag == "dynamic" and o.visit then
-		error("TODO")
+		return visit(o.sink, f, ...)
+	elseif tag == "func" then
+		if o.args then
+			return visit(o.args, f, ...)
+		elseif o.buf then
+			return visit(o.buf, f, ...)
+		end
+	elseif tag == "buf" then
+		return visit(o.tail, f, ...)
 	elseif not tag then
 		for _,v in pairs(o) do
 			f(v, ...)
@@ -177,8 +255,30 @@ local function walk(o, f, ...)
 	return dowalk(o,{},f,...)
 end
 
-D.data = struct()
-D.G_state = memslot { ctype = "struct { void *instance; uint64_t mask; }" }
+local function mappednode(d)
+	for node,data in pairs(D.mapping) do
+		if data == d then
+			return node
+		end
+	end
+end
+
+local function describe(d)
+	local buf = buffer.new()
+	buf:putf("<%s>", gettag(d))
+	local node = mappednode(d)
+	if node then
+		buf:put(" (mapped to `")
+		if node.op == "VAR" then
+			buf:putf("%s.", node.tab.name)
+		end
+		buf:putf("%s')", node.name)
+	end
+	return tostring(buf)
+end
+
+D.G_state = memslot { ctype = "struct { void *instance; uint64_t mask; }", init = false }
+D.actions = databuf()
 
 ---- Dataflow ------------------------------------------------------------------
 -- fixpoint rules:
@@ -188,23 +288,19 @@ D.G_state = memslot { ctype = "struct { void *instance; uint64_t mask; }" }
 -- * `map_var` is called for each visited variable that has no models
 
 local function map_tab(node)
-	local name = tostring(node.name)
-	local mapping = D.data.fields[name]
-	if not mapping then
-		if #node.shape.fields == 0 then
-			mapping = struct()
+	local mapping
+	if #node.shape.fields == 0 then
+		mapping = struct()
+	else
+		local s = node.shape.fields[1]
+		if #node.shape.fields == 1 and s.op == "VGET" and #s.idx == 0 then
+			assert(not D.mapping[s.var], "NYI (shared table length)")
+			mapping = dataframe()
+			D.mapping[s.var] = size(mapping)
 		else
-			local s = node.shape.fields[1]
-			if #node.shape.fields == 1 and s.op == "VGET" and #s.idx == 0 then
-				assert(not D.mapping[s.var], "NYI (shared table length)")
-				mapping = dataframe()
-				D.mapping[s.var] = size(mapping)
-			else
-				-- don't map it
-				return
-			end
+			-- don't map it
+			return
 		end
-		D.data.fields[tostring(node.name)] = mapping
 	end
 	D.mapping[node] = mapping
 end
@@ -231,40 +327,55 @@ local function map_var(node)
 		return
 	end
 	D.mapping[node] = mapping
+	local default = G:var(node.tab, "default'$", false, node.name)
+	if default then
+		node.m3_default = default
+		if not mapping.dummy then
+			mapping.dummy = true
+		end
+	end
 end
 
 local function islit(x)
 	return type(x) == "number" or type(x) == "string"
 end
 
+local resolvetab
+
 local function resolve(o)
 	if type(o) == "string" then
 		return expr(o)
 	elseif type(o) == "function" then
-		return resolve(o())
+		return func(o)
 	elseif type(o) == "table" then
 		local tag = gettag(o)
-		if tag == "splat" then
-			local values = {}
-			for i,v in ipairs(o.values) do
-				values[i] = resolve(v)
+		if not tag then
+			return struct(resolvetab(o))
+		elseif tag == "struct" then
+			return struct(resolvetab(o.fields))
+		elseif tag == "splat" then
+			return splat(resolvetab(o.values))
+		elseif tag == "func" then
+			if o.args then
+				return func(o.func, resolvetab(o.args))
 			end
-			return splat(values)
-		elseif tag then
-			return o
-		else
-			local s = struct()
-			for k,v in pairs(o) do
-				if not islit(k) then
-					k = resolve(k)
-				end
-				s.fields[k] = resolve(v)
-			end
-			return s
 		end
+		-- add other as needed
+		return o
 	else
 		return literal(o)
 	end
+end
+
+resolvetab = function(t)
+	local r = {}
+	for k,v in pairs(t) do
+		if not islit(k) then
+			k = resolve(k)
+		end
+		r[k] = resolve(v)
+	end
+	return r
 end
 
 local function dataflow_transaction(tx)
@@ -319,8 +430,9 @@ local function dataflow_visit(dcx, node)
 			end
 		elseif not node.m3_tablen then
 			map_var(node)
-			node.m3_default = G:var(node.tab, "default'$", false, node.name)
-			table.insert(dcx.backlog, node.m3_default)
+			if node.m3_default then
+				table.insert(dcx.backlog, node.m3_default)
+			end
 		end -- else: tablen is mapped by `map_tab`
 	elseif node.op == "TAB" then
 		map_tab(node)
@@ -453,7 +565,7 @@ local function dummylayout(slots)
 	else
 		region = ffi.new(blockct(size, align))
 	end
-	mem.anchor(region)
+	shutdown(region, "anchor")
 	for _, slot in ipairs(slots) do
 		slot.ptr = ffi.cast(ffi.typeof("$*", slot.ctype), region)
 	end
@@ -467,34 +579,35 @@ local function ctype_isstruct(ct)
 	return ctype_type(ct) == 1
 end
 
-local function markslot(o,s)
+local function markslot(o,m,all)
 	local tag = gettag(o)
 	if tag == "memslot" then
-		s[o] = true
+		all[o] = true
+		o[m] = true
 	elseif tag == "column" then
-		o.mark = true -- for dataframe_ctype
-		markslot(o.df.slot,s)
+		o.mark = true -- for dataframe_ctype / autoselect
+		markslot(o.df.slot, m, all)
+	elseif tag == "buf" then
+		markslot(o.tail, m, all)
+		if m == "write" then
+			o.tail.read = true
+		end
 	end
 end
 
 local function memlayout()
-	local reads, writes = {}, {}
-	reads[D.G_state] = true
-	writes[D.G_state] = true
+	local all = {}
+	markslot(D.G_state, "read", all)
+	markslot(D.G_state, "write", all)
+	markslot(D.actions.tail, "read", all)
 	for _,tx in ipairs(D.transactions) do
 		for _,a in ipairs(tx.actions) do
-			walk(a.input, markslot, reads)
-			walk(a.output, markslot, writes)
+			walk(a.input, markslot, "read", all)
+			walk(a.output, markslot, "write", all)
 		end
 	end
 	for _,data in pairs(D.mapping) do
-		walk(data, markslot, reads)
-	end
-	local all = {}
-	for _,t in ipairs({reads,writes}) do
-		for x in pairs(t) do
-			all[x] = true
-		end
+		walk(data, markslot, "read", all)
 	end
 	local ro, wo, rw = {}, {}, {}
 	for o in pairs(all) do
@@ -506,12 +619,21 @@ local function memlayout()
 			o.ctype = "double"
 		end
 		o.ctype = ffi.typeof(o.ctype)
+		if o.dummy == true then
+			o.dummy = cdata.dummy(o.ctype)
+		end
+		if o.init == nil then
+			o.init = o.dummy
+		end
+		if o.read and (not o.write) and o.init == nil then
+			error(string.format("%s is read but never written and has no initializer", describe(o)))
+		end
 		local t
-		if reads[o] and (writes[o] or ctype_isstruct(o.ctype)) then
+		if o.read and (o.write or ctype_isstruct(o.ctype)) then
 			t = rw
-		elseif reads[o] then
+		elseif o.read then
 			t = ro
-		elseif writes[o] then
+		elseif o.write then
 			t = wo
 		end
 		if t then
@@ -523,7 +645,15 @@ local function memlayout()
 	dummylayout(wo)
 	for o in pairs(all) do
 		if o.init then
-			o.ptr[0] = o.init
+			if type(o.init) == "function" then
+				if environment.parallel and o.proc_init then
+					require("m3_mp").proc_init(function() o.ptr[0] = o.init() end)
+				else
+					o.ptr[0] = o.init()
+				end
+			else
+				o.ptr[0] = o.init
+			end
 		end
 	end
 end
@@ -583,17 +713,12 @@ function map_obj.size(obj, tab, var)
 	end
 end
 
--- function map_obj.dynamic(obj, tab, var)
--- 	local map = assert(obj.map, "dynamic object doesn't implement map")
--- 	return map(tab, var)
--- end
-
 local function map_default(obj, var)
 	local default = var.m3_default
 	if not (default and default.m3_models) then return end
-	assert(obj.ctype, "default without ctype")
+	assert(obj.dummy ~= nil, "default without dummy")
 	-- TODO: allow custom dummy values
-	local testdummy = cdata.dummy(obj.ctype)
+	local testdummy = obj.dummy
 	if testdummy ~= testdummy then
 		testdummy = "let x = %s in x != x"
 	else
@@ -629,7 +754,6 @@ local function makemappings()
 	end
 	G:define(buf)
 end
-
 
 local function visit_expr(o, tx)
 	if gettag(o) == "expr" then
@@ -693,80 +817,92 @@ local function compilegraph()
 	G = assert(G:compile())
 	-- pre-create instance so that instance creation can assume we always have a non-null instance
 	-- available
-	D.G_state.ptr.instance = G:newinstance(ffi.C.m3__mem_extalloc, mem.stack)
+	D.G_state.ptr.instance = G:newinstance(ffi.C.m3__mem_extalloc, mem.arena)
 	D.G_state.ptr.mask = 0
 end
 
+---- Action buffers ------------------------------------------------------------
+
+local function abuf_action(f, n)
+	local buf = buffer.new()
+	buf:put("local f = ...\nreturn function(state, idx)\nf(")
+	if n > 0 then
+		buf:put("state[idx]")
+		for i=2, n do buf:putf(", state[idx+%d]", i-1) end
+	end
+	buf:putf(") return state[idx+%d](state, idx+%d)\nend\n", n, n+1)
+	return load(buf)(f)
+end
+
+local function stmt_buffer(stmt, ...)
+	return stmt:buffer(...)
+end
+
+local abuf_commit = load([[
+	local state = ...
+	local tail
+	local function abuf_stop() end
+	return function()
+		local h, t = state[0], tail[0]
+		if t > h then
+			state[0] = t
+			state[t+1] = abuf_stop
+			state[1](state, 2)
+		end
+	end
+]])(D.actions.state)
+
 ---- Transaction compilation ---------------------------------------------------
 
-local function upvalname(ctx, v)
-	if type(v) == "nil" or type(v) == "number" or type(v) == "boolean" then
-		return v
-	elseif type(v) == "string" then
-		return string.format("%q", v)
-	else
-		local name = string.format("u%p", v)
-		ctx.uv[name] = v
-		return name
-	end
-end
-
-local function newname(ctx)
-	ctx.nameid = ctx.nameid+1
-	return string.format("v%d", ctx.nameid)
-end
-
-local function indexexpr(ctx, k)
-	if type(k) == "string" and k:match("^[%a_][%w_]*$") then
-		return string.format(".%s", k)
-	else
-		return string.format("[%s]", upvalname(ctx, k))
-	end
-end
-
 -- Read --------------------------------
+
+local function newvar(ctx, value)
+	local name = ctx:name()
+	ctx.buf:putf("local %s = %s\n", name, value)
+	return name
+end
 
 local emit_read = {}
 local emitread
 
 function emit_read.memslot(ctx, slot)
-	local ptr = upvalname(ctx, slot.ptr)
+	local ptr = ctx.uv[slot.ptr]
 	if ctype_isstruct(slot.ctype) then
 		return ptr
 	else
-		local name = newname(ctx)
-		ctx.buf:putf("local %s = %s[0]\n", name, ptr)
-		return name
+		return newvar(ctx, string.format("%s[0]", ptr))
 	end
 end
 
 function emit_read.struct(ctx, struct)
-	local result = newname(ctx)
-	ctx.buf:putf("local %s = {}\n", result)
+	local result = newvar(ctx, "{}")
 	for k,v in pairs(struct.fields) do
-		ctx.buf:putf("%s%s = %s\n", result, indexexpr(ctx, k), emitread(ctx, v))
+		ctx.buf:putf("%s%s = %s\n", result, code.index(ctx.uv, k), emitread(ctx, v))
 	end
 	return result
 end
 
 function emit_read.column(ctx, col)
-	return string.format("%s.%s", upvalname(ctx, col.df.slot.ptr), col.name)
+	return newvar(ctx, string.format("%s.%s", ctx.uv[col.df.slot.ptr], col.name))
 end
 
 function emit_read.dataframe(ctx, df)
-	return upvalname(ctx, df.slot.ptr)
+	return ctx.uv[df.slot.ptr]
 end
 
 function emit_read.size(ctx, size)
 	local tag = gettag(size.obj)
 	if tag == "dataframe" then
-		return string.format("%s.num", upvalname(ctx, df.slot.ptr))
+		return newvar(ctx, string.format("%s.num", ctx.uv[df.slot.ptr]))
 	else
 		error(string.format("NYI (size %s)", tag))
 	end
 end
 
 function emit_read.splat(ctx, splat)
+	if #splat.values == 0 then
+		return "nil"
+	end
 	local results = {}
 	for i,v in ipairs(splat.values) do
 		results[i] = emitread(ctx, v)
@@ -774,14 +910,12 @@ function emit_read.splat(ctx, splat)
 	return table.concat(results, ", ")
 end
 
-function emit_read.literal(_, literal)
-	return tostring(literal.value)
+function emit_read.literal(ctx, literal)
+	return ctx.uv[literal]
 end
 
-function emit_read.dynamic(ctx, dyn)
-	local resname = newname(ctx)
-	ctx.buf:putf("local %s = %s()\n", resname, upvalname(ctx, dyn:reader()))
-	return resname
+function emit_read.func(ctx, call)
+	return newvar(ctx, string.format("local %s = %s()\n", resname, ctx.uv[call.func]))
 end
 
 function emit_read.expr(ctx, expr)
@@ -804,7 +938,7 @@ local emit_write = {}
 local emitwrite
 
 function emit_write.memslot(ctx, slot, value)
-	local ptr = upvalname(ctx, slot.ptr)
+	local ptr = ctx.uv[slot.ptr]
 	if value then
 		ctx.buf:putf("if %s ~= nil then %s[0] = %s end\n", value, ptr, value)
 	end
@@ -815,22 +949,22 @@ end
 
 function emit_write.struct(ctx, struct, value)
 	assert(value, "cannot mutate struct")
-	local vname = newname(ctx)
+	local vname = ctx:name()
 	local result
 	for k,v in pairs(struct.fields) do
 		local pos = #ctx.buf
-		ctx.buf:putf("do local %s = (%s) and (%s)%s\n", vname, value, value, indexexpr(ctx, k))
+		ctx.buf:putf("do local %s = (%s) and (%s)%s\n", vname, value, value, code.index(ctx.uv, k))
 		local r = emitwrite(ctx, v, vname)
 		if r then
 			if not result then
-				result = newname(ctx)
+				result = ctx:name()
 				local buf = buffer.new()
 				buf:put(ctx.buf:get(pos))
 				buf:putf("local %s = {}\n", result)
 				buf:put(ctx.buf)
 				ctx.buf = buf
 			end
-			ctx.buf:putf("%s%s = %s\n", result, indexexpr(ctx, k), r)
+			ctx.buf:putf("%s%s = %s\n", result, code.index(ctx.uv, k), r)
 		end
 		ctx.buf:put("end\n")
 	end
@@ -839,14 +973,14 @@ end
 
 function emit_write.column(ctx, col, value)
 	if value then
-		ctx.buf:putf("%s:overwrite('%s', %s)\n", upvalname(ctx, col.df.slot.ptr), col.name, value)
+		ctx.buf:putf("%s:overwrite('%s', %s)\n", ctx.uv[col.df.slot.ptr], col.name, value)
 	else
 		error("TODO")
 	end
 end
 
 function emit_write.dataframe(ctx, df, value)
-	local ptr = upvalname(ctx, df.slot.ptr)
+	local ptr = ctx.uv[df.slot.ptr]
 	if value then
 		ctx.buf:putf("if %s ~= nil then %s:settab(%s) end\n", value, ptr, value)
 	end
@@ -857,7 +991,7 @@ function emit_write.splat(ctx, splat, value)
 	assert(value, "cannot mutate splat")
 	local names = {}
 	for i=1, #splat.values do
-		names[i] = newname(ctx)
+		names[i] = ctx:name()
 	end
 	ctx.buf:putf("local %s = %s\n", table.concat(names, ", "), value)
 	local results = {}
@@ -872,22 +1006,122 @@ function emit_write.splat(ctx, splat, value)
 	end
 end
 
-function emit_write.dynamic(ctx, dyn, value)
-	ctx.buf:putf("%s(%s)\n", upvalname(ctx, dyn:writer()), value)
+local function emitbufcall(ctx, n, trampoline, value)
+	ctx.uv.max = math.max
+	local tail = ctx.uv[D.actions.tail.ptr]
+	local state = ctx.uv[D.actions.state]
+	ctx.buf:putf(
+		"do local idx = max(%s[0], %s[0]) %s[0]=idx+%d idx=idx-%s[0] %s[idx+1]",
+		state, tail, tail, n+1, state, state
+	)
+	for i=1, n do ctx.buf:putf(", %s[idx+%d]", state, i+1) end
+	ctx.buf:putf(" = %s", ctx.uv[trampoline])
+	if n > 0 then ctx.buf:putf(", %s", value) end
+	ctx.buf:put(" end\n")
+end
+
+function emit_write.func(ctx, call, value)
+	if call.buf then
+		emitbufcall(ctx, call.n, abuf_action(call.func, call.n), value)
+	else
+		ctx.buf:putf("%s(%s)\n", ctx.uv[call.func], value)
+	end
+end
+
+-- TODO: vectors should be stored in the actionbuf as vectors, and then expanded inside the action
+-- (ie. stmt_buffer)
+function emit_write.dml(ctx, dml, value)
+	local args = ctx.uv[sqlite.statement(dml.sql)]
+	if dml.n > 0 then args = string.format("%s, %s", args, value) end
+	emitbufcall(ctx, 1+dml.n, abuf_action(stmt_buffer, 1+dml.n), args)
+end
+
+function emit_write.autoselect(ctx, asel, value)
+	assert(value, "cannot mutate autoselect")
+	local tag = gettag(asel.obj)
+	if tag == "struct" then
+		local values, cols = {}, {}
+		for k,v in pairs(asel.obj.fields) do
+			if gettag(v) ~= "size" then
+				table.insert(cols, sqlite.escape(k))
+				table.insert(values, v)
+			end
+		end
+		if #cols == 0 then return end
+		local name = ctx:name()
+		local sql = {sqlite.sql("SELECT", unpack(cols)), sqlite.sql("FROM", asel.tab), asel.sql}
+		ctx.uv.assert = assert
+		ctx.buf:putf(
+			"local %s = %s.sqlite3_stmt\n%s:bindargs(%s)\nassert(%s:step(), 'query returned no rows')\n",
+			name, ctx.uv[sqlite.statement(sql)],
+			name, value,
+			name
+		)
+		for i=1, #cols do
+			emitwrite(ctx, values[i], string.format("%s:double(%d)", name, i-1))
+		end
+		ctx.buf:putf("%s:reset()\n", name)
+	elseif tag == "dataframe" then
+		local schema = sqlite.schema(asel.tab)
+		local cols, names, dummies = {}, {}, {}
+		for name,col in pairs(asel.obj.columns) do
+			if col.mark then
+				if schema.columns[name] then
+					table.insert(cols, col)
+					table.insert(names, string.format("%s.%s", asel.tab, sqlite.escape(name)))
+				elseif col.dummy ~= nil then
+					table.insert(dummies, col)
+				else
+					error(string.format("column `%s.%s' is not in the schema and has no dummy value",
+						asel.tab, name))
+				end
+			end
+		end
+		if #cols == 0 and #dummies == 0 then return end
+		if #names == 0 then
+			-- ensure we select at least one value.
+			-- note that it would be faster to `SELECT COUNT(*)` here, but this case will almost
+			-- never happen in practice so it's not worth optimizing for.
+			names[1] = "0"
+		end
+		local ptr = ctx.uv[asel.obj.slot.ptr]
+		local sql = {sqlite.sql("SELECT", unpack(names)), sqlite.sql("FROM", asel.tab), asel.sql}
+		ctx.buf:putf(
+			"for row in %s:rows(%s) do\nlocal idx = %s:alloc()\n",
+			ctx.uv[sqlite.statement(sql)],
+			value,
+			ptr
+		)
+		for i,c in ipairs(cols) do
+			ctx.buf:putf(
+				"%s.%s[idx] = row:%s(%d)\n",
+				ptr,
+				c.name,
+				cdata.isfp(c.ctype) and "double" or "int",
+				i-1
+			)
+		end
+		for _,c in ipairs(dummies) do
+			ctx.buf:putf("%s.%s[idx] = %s\n", ptr, c.name, ctx.uv[c.dummy])
+		end
+		ctx.buf:put("end\n")
+	else
+		error(string.format("cannot autoselect into %s", tag))
+	end
 end
 
 function emit_write.pipe(ctx, pipe, value)
 	assert(value, "cannot mutate pipe")
 	if pipe.map_f then
-		local v = newname(ctx)
-		ctx.buf:putf("local %s = %s(%s)\n", v, upvalname(ctx, pipe.map_f), value)
+		local v = ctx:name()
+		ctx.buf:putf("local %s = %s(%s)\n", v, ctx.uv[pipe.map_f], value)
 		value = v
 	end
 	if pipe.filter_f then
-		ctx.buf:putf("if %s(%s) then\n", upvalname(ctx, pipe.filter_f), value)
+		ctx.buf:putf("if %s(%s) then\n", ctx.uv[pipe.filter_f], value)
 	end
 	if pipe.channel then
-		ctx.buf:putf("%s(%s)\n", upvalname(ctx, pipe.channel.send), value)
+		ctx.buf:putf("%s(%s)\n", ctx.uv[pipe.channel.send], value)
 	else
 		for _,sink in ipairs(pipe.sink) do
 			emitwrite(ctx, sink, value)
@@ -906,7 +1140,7 @@ function emit_write.ret(ctx, ret, value)
 end
 
 function emit_write.mutate(ctx, mut, value)
-	ctx.buf:putf("%s(%s", upvalname(ctx, mut.f), emitwrite(ctx, mut.data))
+	ctx.buf:putf("%s(%s", ctx.uv[mut.f], emitwrite(ctx, mut.data))
 	if value then
 		ctx.buf:putf(", %s", value)
 	end
@@ -918,30 +1152,6 @@ emitwrite = function(ctx, x, v)
 end
 
 ----------------------------------------
-
-local function newemit()
-	return {
-		uv     = {},
-		nameid = 0,
-		buf    = buffer.new(),
-		narg   = 0,
-		nret   = 0
-	}
-end
-
-local function emitupvalues(uv, buf)
-	local vs = {}
-	if next(uv) then
-		local comma = "local "
-		for k,v in pairs(uv) do
-			table.insert(vs, v)
-			buf:put(comma, k)
-			comma = ","
-		end
-		buf:put(" = ...\n")
-	end
-	return vs
-end
 
 local function cdatamask(ofs, size)
 	if type(ofs) == "table" then
@@ -966,7 +1176,9 @@ local function visit_mmask(o, ctx)
 end
 
 local function compiletransaction(tx, graph_instance)
-	local ctx = newemit()
+	local ctx = code.new()
+	ctx.narg = 0
+	ctx.nret = 0
 	-- query, if any, must happen before any masks are set, because it may create a new instance.
 	if tx.query then
 		ctx.uv.query = tx.query.query
@@ -996,11 +1208,15 @@ local function compiletransaction(tx, graph_instance)
 			ctx.buf:putf("G_state.mask = bor(G_state.mask, 0x%xull)\n", tx.reset.mask)
 		end
 	end
-	for _,a in ipairs(tx.actions) do
-		emitwrite(ctx, a.output, emitread(ctx, a.input))
+	local inputs = {}
+	for i,a in ipairs(tx.actions) do
+		inputs[i] = emitread(ctx, a.input)
+	end
+	for i,a in ipairs(tx.actions) do
+		emitwrite(ctx, a.output, inputs[i])
 	end
 	local buf = buffer.new()
-	local uv = emitupvalues(ctx.uv, buf)
+	local uv = code.emitupvalues(ctx.uv, buf)
 	buf:put("return function(")
 	if ctx.narg > 0 then
 		buf:put("arg1")
@@ -1025,7 +1241,7 @@ end
 -- is nonzero
 local function graph_instancefunc()
 	return load(string.format([[
-		local state, G, C, stack, setmask, iswritable = ...
+		local state, G, C, arena, setmask, iswritable = ...
 		return function()
 			if not iswritable(state.instance) then
 				setmask(0x%xull)
@@ -1035,12 +1251,12 @@ local function graph_instancefunc()
 				return state.instance
 			end
 			::new::
-			local instance = G:newinstance(C.m3__mem_extalloc, stack, state.instance, state.mask)
+			local instance = G:newinstance(C.m3__mem_extalloc, arena, state.instance, state.mask)
 			state.instance = instance
 			state.mask = 0
 			return instance
 		end
-	]], cdatamask(D.G_state)))(D.G_state.ptr, G, ffi.C, mem.stack, mem.setmask,
+	]], cdatamask(D.G_state)))(D.G_state.ptr, G, ffi.C, mem.arena, mem.setmask,
 		mem.iswritable)
 end
 
@@ -1060,12 +1276,60 @@ end
 
 ---- Initialization ------------------------------------------------------------
 
-local function startup()
+local function collect(o, all)
+	local tag = gettag(o)
+	if tag == "memslot" or tag == "dataframe" then
+		all[o] = true
+	end
+end
+
+local function traceobjs()
+	local all = {}
+	for _,tx in ipairs(D.transactions) do
+		for _,a in ipairs(tx.actions) do
+			walk(a.input, collect, all)
+			walk(a.output, collect, all)
+		end
+	end
+	for node,data in pairs(D.mapping) do
+		all[data] = node.tab and string.format("%s.%s", node.tab.name, node.name)
+			or tostring(node.name)
+	end
+	local objs = {}
+	for o,m in pairs(all) do
+		table.insert(objs, {obj=o, map=m ~= true and m or nil})
+	end
+	table.sort(objs, function(a, b)
+		if a.map or b.map then
+			if a.map and b.map then
+				return a.map < b.map
+			else
+				return a.map ~= nil
+			end
+		end
+		a, b = a.obj, b.obj
+		local atag = gettag(a)
+		local btag = gettag(b)
+		if atag ~= btag then
+			return atag < btag
+		end
+		if atag == "dataframe" then
+			a, b = a.slot, b.slot
+		end
+		return ffi.cast("intptr_t", a.ptr or 0) < ffi.cast("intptr_t", b.ptr or 0)
+	end)
+	return objs
+end
+
+local function init()
 	dataflow()
 	memlayout()
 	compilegraph()
+	if enabled("data") then
+		event("data", traceobjs())
+	end
 	compiletransactions()
-	de.event("data", D)
+	code.setupvalue(abuf_commit, "tail", D.actions.tail.ptr)
 	table.clear(D)
 end
 
@@ -1188,6 +1452,7 @@ local function transaction_insert(transaction, a, b)
 			for _,t in ipairs(D.mapping_tables) do
 				if tab(t) then
 					local cols = {}
+					-- TODO: this should only look at mapped fields
 					for _,node in ipairs(t.m3_vars) do
 						local name = tostring(node.name)
 						cols[name] = b(name)
@@ -1239,11 +1504,8 @@ local function transaction_define(transaction, src)
 	return transaction
 end
 
-local function transaction_call(transaction, f, ...)
-	return transaction_action(transaction, {
-		input = splat({...}),
-		output = func(f)
-	})
+local function transaction_bind(transaction, name, value)
+	error("TODO(fhk): query-vset variables")
 end
 
 local function transaction_read(transaction, ...)
@@ -1266,21 +1528,99 @@ local function transaction_write(transaction, ...)
 	return transaction
 end
 
-local function transaction_bind(transaction, name, value)
-	error("TODO(fhk): query-vset variables")
+local function transaction_mutate(transaction, data, f, ...)
+	return transaction_action(transaction, {
+		input  = splat({...}),
+		output = mutate(data, f)
+	})
+end
+
+local function transaction_call(transaction, f, ...)
+	return transaction_action(transaction, {
+		input  = splat({...}),
+		output = call(f, select("#", ...), D.actions)
+	})
+end
+
+local function transaction_sql(transaction, stmt, ...)
+	return transaction_action(transaction, {
+		input  = splat({...}),
+		output = dml(stmt, select("#", ...))
+	})
+end
+
+local function transaction_sql_insert(transaction, tab, values)
+	if type(values) == "table" then
+		local insert = {sqlite.sql("INSERT", tab)}
+		local args = {}
+		local dd = buffer.new()
+		dd:put("CREATE TABLE IF NOT EXISTS ", tab, "(")
+		-- TODO: types could be inferred from fhk here?
+		local comma = ""
+		for col, val in pairs(values) do
+			dd:put(comma, col, " REAL")
+			comma = ","
+			table.insert(insert, sqlite.sql("VALUES", {col=col, value="?"}))
+			table.insert(args, val)
+		end
+		dd:put(")")
+		sqlite.datadef(tostring(dd))
+		return transaction_action(transaction, {
+			input  = splat(args),
+			output = dml(insert, #args)
+		})
+	elseif type(values) == "function" then
+		-- TODO: here the table must already exist, and values(col) returns the value for a column.
+		error("TODO")
+	else
+		error("sql_insert: expected table or function")
+	end
+end
+
+local function transaction_autoselect(transaction, tab)
+	return transaction_action(transaction, function(action)
+		for _,t in ipairs(D.mapping_tables) do
+			local name = tostring(t.name)
+			local sqlt = sqlite.schema(name)
+			if sqlt then
+				local sql, bind = tab(name, sqlt)
+				if sql then
+					local obj = D.mapping[t]
+					if gettag(obj) == "struct" then
+						-- only select fields that exist in the schema.
+						-- we don't need equivalent logic for dataframes, since they don't support
+						-- only writing a subset of the columns.
+						-- a partial write for a dataframe will fail at runtime.
+						local new = struct()
+						for k,v in pairs(obj.fields) do
+							if sqlt.columns[k] then
+								new.fields[k] = v
+							end
+						end
+						obj = new
+					end
+					action(bind or splat(), autoselect(obj, name, sql))
+				end
+			end
+		end
+	end)
 end
 
 local transaction_mt = {
 	["m3$transaction"] = true,
 	__index = {
-		update = transaction_update,
-		insert = transaction_insert,
-		delete = transaction_delete,
-		define = transaction_define,
-		call   = transaction_call,
-		bind   = transaction_bind,
-		read   = transaction_read,
-		write  = transaction_write
+		update     = transaction_update,
+		insert     = transaction_insert,
+		delete     = transaction_delete,
+		define     = transaction_define,
+		bind       = transaction_bind,
+		read       = transaction_read,
+		write      = transaction_write,
+		mutate     = transaction_mutate,
+		call       = transaction_call,
+		sql        = transaction_sql,
+		sql_insert = transaction_sql_insert,
+		autoselect = transaction_autoselect
 	}
 }
 
@@ -1295,34 +1635,26 @@ local function istransaction(x)
 	return mt and mt["m3$transaction"]
 end
 
-local function read(...)
-	return transaction():read(...)
-end
-
-local function write(...)
-	return transaction():write(...)
-end
-
-local shared = {}
-if environment.mode == "mp" then
+local shared_input, shared_output
+if environment.parallel then
 	local mp = require "m3_mp"
 	local function shpipe(dispatch)
 		local source = pipe()
 		local sink = pipe()
 		sink.sink = source.sink
-		source.channel = dispatch:channel(access("write", sink))
+		source.channel = dispatch:channel(transaction():write(sink))
 		return source
 	end
-	shared.input = function() return shpipe(mp.work) end
-	shared.output = function() return shpipe(mp.main) end
+	shared_input = function() return shpipe(mp.work) end
+	shared_output = function() return shpipe(mp.main) end
 else
-	shared.input = pipe
-	shared.output = pipe
+	shared_input = pipe
+	shared_output = pipe
 end
 
 local function tosink(x)
 	if type(x) == "function" then
-		return func(x)
+		return call(x)
 	else
 		return x
 	end
@@ -1334,8 +1666,6 @@ local function connect(source, sink)
 	local tag = gettag(source)
 	if tag == "pipe" then
 		table.insert(source.sink, sink)
-	elseif tag == "dynamic" and source.connect then
-		return source:connect(sink)
 	else
 		-- TODO: allow arbitrary data objects here, eg. if source is an fhk expression,
 		-- then make a pipe that outputs a value whenever the expression changes
@@ -1344,24 +1674,23 @@ local function connect(source, sink)
 	return sink
 end
 
-local function globals()
-	return D.data
-end
-
 --------------------------------------------------------------------------------
 
 return {
-	startup       = startup,
+	G             = G,
+	init          = init,
 	memslot       = memslot,
+	arg           = arg,
+	ret           = ret,
+	func          = func,
 	pipe          = pipe,
-	shared        = shared,
+	commit        = abuf_commit,
+	shared_input  = shared_input,
+	shared_output = shared_output,
 	connect       = connect,
 	transaction   = transaction,
 	istransaction = istransaction,
-	read          = read,
-	write         = write,
 	define        = define,
 	defined       = defined,
 	include       = include,
-	globals       = globals,
 }

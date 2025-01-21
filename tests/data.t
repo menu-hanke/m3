@@ -113,3 +113,27 @@ if test "data:sql:datamap" then
 		end
 	}
 end
+
+if test "data:sql:null-dummy:*" then
+	datadef "CREATE TABLE A(id INTEGER PRIMARY KEY, x REAL);"
+	define [[
+		table A
+		model A default'x = 123
+	]]
+	local getx = transaction():read("A.x")
+	local want
+	if test "data:sql:null-dummy:present" then
+		datadef "INSERT INTO A(x) VALUES (456)"
+		want = 456
+	elseif test "data:sql:null-dummy:absent" then
+		datadef "INSERT INTO A(x) VALUES (NULL)"
+		want = 123
+	else
+		test(true)
+	end
+	simulate {
+		function()
+			assert(getx() == want)
+		end
+	}
+end

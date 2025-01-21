@@ -253,12 +253,17 @@ local function trace_sql(stmt, ...)
 	trace(string.format("SQL   %s %s", stmt:sql(), vpretty("s", "\t", ...)))
 end
 
+local function trace_code(code)
+	trace(string.format("CODE  %s", code))
+end
+
 local trace_events = {
 	data  = { mask="d", func=trace_data },
 	save  = { mask="s", func=trace_save },
 	load  = { mask="s", func=trace_load },
 	mask  = { mask="s", func=trace_mask },
-	sql   = { mask="q", func=trace_sql  }
+	sql   = { mask="q", func=trace_sql  },
+	code  = { mask="c", func=trace_code },
 }
 
 local TRACE_ALL = "dsq"

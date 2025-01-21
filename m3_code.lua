@@ -1,4 +1,5 @@
 local buffer = require "string.buffer"
+local event = require("m3_debug").event
 
 local function uv__index(uv, v)
 	if type(v) == "nil" or type(v) == "boolean" then
@@ -76,9 +77,16 @@ local function setupvalue(f, up, v)
 	debug.setupvalue(f, upvalueidx(f, up), v)
 end
 
+-- TODO: add descriptive chunk names for each call
+local function loadcode(...)
+	event("code", ...)
+	return load(...)
+end
+
 return {
 	emitupvalues = emitupvalues,
 	index        = index,
 	new          = new,
-	setupvalue   = setupvalue
+	setupvalue   = setupvalue,
+	load         = loadcode
 }

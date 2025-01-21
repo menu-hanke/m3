@@ -8,6 +8,11 @@ local ffi = require "ffi"
 local C = ffi.C
 local select, type = select, type
 
+local SQLITE_TRANSIENT = ffi.cast("void *", -1)
+local SQLITE_ROW  = 100
+local SQLITE_DONE = 101
+local SQLITE_NULL = 5
+
 local MAX_BACKLOG = 1000
 
 local global_connection  -- sqlite3 *
@@ -146,7 +151,6 @@ local function check(x, r)
 	end
 end
 
-local SQLITE_TRANSIENT = ffi.cast("void *", -1)
 local function stmt_bind(stmt, i, v)
 	local ty = type(v)
 	if ty == "nil" then
@@ -214,8 +218,6 @@ local function stmt_finalize(stmt)
 	check(stmt, C.sqlite3_finalize(stmt))
 end
 
-local SQLITE_ROW  = 100
-local SQLITE_DONE = 101
 local function stmt_step(stmt)
 	local s = C.sqlite3_step(stmt)
 	if s == SQLITE_ROW then
@@ -250,6 +252,18 @@ local function stmt_sql(stmt)
 	return ffi.string(C.sqlite3_sql(stmt))
 end
 
+local function stmt_optdouble(stmt, i)
+	if C.sqlite3_column_type(stmt, i) ~= SQLITE_NULL then
+		return (C.sqlite3_column_double(stmt, i))
+	end
+end
+
+local function stmt_optint(stmt, i)
+	if C.sqlite3_column_type(stmt, i) ~= SQLITE_NULL then
+		return (C.sqlite3_column_int(stmt, i))
+	end
+end
+
 ffi.metatype("sqlite3_stmt", {
 	__index = {
 		bind       = stmt_bind,
@@ -262,6 +276,8 @@ ffi.metatype("sqlite3_stmt", {
 		exec       = stmt_exec,
 		double     = C.sqlite3_column_double,
 		int        = C.sqlite3_column_int,
+		optdouble  = stmt_optdouble,
+		optint     = stmt_optint,
 		text       = stmt_text,
 		sql        = stmt_sql
 	}

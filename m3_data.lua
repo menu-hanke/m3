@@ -12,6 +12,7 @@ local buffer = require "string.buffer"
 local ffi = require "ffi"
 require "table.clear"
 
+local load = code.load
 local event, enabled = dbg.event, dbg.enabled
 
 local G = fhk.newgraph()
@@ -1039,18 +1040,22 @@ end
 function emit_write.autoselect(ctx, asel, value)
 	assert(value, "cannot mutate autoselect")
 	local tag = gettag(asel.obj)
+	local tname = sqlite.rename(asel.tab)
+	local schema = sqlite.schema(tname)
 	if tag == "struct" then
 		local values, cols = {}, {}
 		for k,v in pairs(asel.obj.fields) do
 			if gettag(v) ~= "size" then
-				table.insert(cols, sqlite.escape(sqlite.rename(asel.tab, k)))
-				table.insert(values, v)
+				local colname = sqlite.rename(asel.tab, k)
+				local col = schema and schema.columns[colname]
+				table.insert(cols, sqlite.escape(colname))
+				table.insert(values, {value=v, null=col and col.nullable})
 			end
 		end
 		if #cols == 0 then return end
 		local name = ctx:name()
 		local sql = {sqlite.sql("SELECT", unpack(cols)),
-			sqlite.sql("FROM", sqlite.escape(sqlite.rename(asel.tab))), asel.sql}
+			sqlite.sql("FROM", sqlite.escape(tname)), asel.sql}
 		ctx.uv.assert = assert
 		ctx.buf:putf(
 			"local %s = %s.sqlite3_stmt\n%s:bindargs(%s)\nassert(%s:step(), 'query returned no rows')\n",
@@ -1059,22 +1064,29 @@ function emit_write.autoselect(ctx, asel, value)
 			name
 		)
 		for i=1, #cols do
-			emitwrite(ctx, values[i], string.format("%s:double(%d)", name, i-1))
+			if values[i].null then
+				ctx.buf:putf("do local v = %s:optdouble(%d) if v then\n", name, i-1)
+				emitwrite(ctx, values[i].value, "v")
+				ctx.buf:put("end end\n")
+			else
+				emitwrite(ctx, values[i].value, string.format("%s:double(%d)", name, i-1))
+			end
 		end
 		ctx.buf:putf("%s:reset()\n", name)
 	elseif tag == "dataframe" then
-		local tname = sqlite.rename(asel.tab)
-		local schema = sqlite.schema(tname)
 		tname = sqlite.escape(tname)
-		local cols, names, dummies = {}, {}, {}
-		for name,col in pairs(asel.obj.columns) do
-			if col.mark then
-				if schema.columns[name] then
-					table.insert(cols, col)
+		local cols, names, dummies, nulls = {}, {}, {}, {}
+		for name,c in pairs(asel.obj.columns) do
+			if c.mark then
+				local colname = sqlite.rename(asel.tab, name)
+				local col = schema.columns[colname]
+				if col then
+					if col.null and c.dummy ~= nil then nulls[c] = true end
+					table.insert(cols, c)
 					table.insert(names, string.format("%s.%s", tname,
 						sqlite.escape(sqlite.rename(asel.tab, name))))
-				elseif col.dummy ~= nil then
-					table.insert(dummies, col)
+				elseif c.dummy ~= nil then
+					table.insert(dummies, c)
 				else
 					error(string.format("column `%s.%s' is not in the schema and has no dummy value",
 						asel.tab, name))
@@ -1097,13 +1109,13 @@ function emit_write.autoselect(ctx, asel, value)
 			ptr
 		)
 		for i,c in ipairs(cols) do
-			ctx.buf:putf(
-				"%s.%s[idx] = row:%s(%d)\n",
-				ptr,
-				c.name,
-				cdata.isfp(c.ctype) and "double" or "int",
-				i-1
-			)
+			ctx.buf:putf("%s.%s[idx] = ", ptr, c.name)
+			local isfp = cdata.isfp(c.ctype)
+			if nulls[c] then
+				ctx.buf:putf("row:%s(%d) or %s\n", isfp and "optdouble" or "optint", i-1, ctx.uv[c.dummy])
+			else
+				ctx.buf:putf("row:%s(%d)\n", isfp and "double" or "int", i-1)
+			end
 		end
 		for _,c in ipairs(dummies) do
 			ctx.buf:putf("%s.%s[idx] = %s\n", ptr, c.name, ctx.uv[c.dummy])

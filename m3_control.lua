@@ -1,8 +1,10 @@
 -- control library.
 
+local code = require "m3_code"
 local data = require "m3_data"
 local mem = require "m3_mem"
 local buffer = require "string.buffer"
+local load = code.load
 local rawget, rawset = rawget, rawset
 
 ---- opcodes -------------------------------------------------------------------

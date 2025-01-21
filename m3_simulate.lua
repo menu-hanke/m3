@@ -11,7 +11,7 @@ local globals = {
 	"all", "any", "call", "dynamic", "exec", "first", "loop", "nothing", "optional", "skip", "try",
 	"arg", "cdata", "connect", "define", "defined", "func", "include", "pipe", "ret", "transaction",
 	"pprint",
-	"database", "datadef",
+	"database", "datadef", "datamap",
 	"uid"
 }
 for _,func in ipairs(globals) do _G[func] = m3[func] end
@@ -25,7 +25,7 @@ end -- else: m3 is in test mode, test is a C funtion
 --   * allow specifying multiple tables
 --   * allow specifying how other tables are joined
 function input(tab, query)
-	global_config.tab = tab
+	global_config.tab = m3.rename(tab)
 	global_config.query = query
 end
 
@@ -63,18 +63,18 @@ local function cmd(o, v)
 	end
 end
 
-local init = m3.transaction():autoselect(function(name, tab)
+local init = m3.transaction():autoselect(function(tab)
 	if not global_config.tab then return end
-	local main = m3.sql_escape(global_config.tab)
+	local main = global_config.tab
 	local sql = {m3.sql("WHERE", string.format("%s.%s=?", main, global_config.col))}
-	if name ~= global_config.tab then
+	if tab.name ~= global_config.tab then
 		-- TODO: `input` should allow specifying the join condition here
-		table.insert(sql, m3.sql("FROM", main))
+		table.insert(sql, m3.sql("FROM", m3.escapesql(main)))
 		for _,fk in ipairs(tab.foreign_keys) do
 			if fk.table == global_config.tab then
 				for _,f in ipairs(fk.fields) do
 					table.insert(sql, m3.sql("WHERE", string.format("%s.%s=%s.%s",
-						main, f.to, m3.sql_escape(name), f.from)))
+						m3.escapesql(main), m3.escapesql(f.to), m3.escapesql(tab.name), m3.escapesql(f.from))))
 				end
 				break
 			end
@@ -86,14 +86,17 @@ end)
 local function autotab()
 	local tab
 	for o in m3.G:objects() do
-		if o.op == "TAB" and #o.shape.fields == 0 and m3.sql_schema(tostring(o.name)) then
-			if tab then
-				error(string.format(
-					"cannot determine input table (`%s' and `%s' both exist in db). Use `input' to set it explicitly.",
-					tab, o.name
-				))
+		if o.op == "TAB" and #o.shape.fields == 0 then
+			local oname = m3.rename(tostring(o.name))
+			if m3.schema(oname) then
+				if tab then
+					error(string.format(
+						"cannot determine input table (`%s' and `%s' both exist in db). Use `input' to set it explicitly.",
+						tab, o.name
+					))
+				end
+				tab = oname
 			end
-			tab = tostring(o.name)
 		end
 	end
 	return tab
@@ -112,7 +115,7 @@ local putwork = m3.transaction():write(workqueue)
 
 local function build()
 	if global_config.tab == nil then global_config.tab = autotab() end
-	local query = m3.sql_statement(global_config.query or autoquery(global_config.tab))
+	local query = m3.statement(global_config.query or autoquery(global_config.tab))
 	local insn = m3.all { m3.any(global_config.insn), m3.commit }
 	local fp
 	m3.connect(workqueue, function(task)

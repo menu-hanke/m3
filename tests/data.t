@@ -97,3 +97,19 @@ if test "data:sql:input-not-unique" then
 		table B
 	]]
 end
+
+if test "data:sql:datamap" then
+	datadef [[
+		CREATE TABLE A(id INTEGER PRIMARY KEY, x REAL);
+		INSERT INTO A(x) VALUES (123);
+	]]
+	define "table B"
+	datamap { B = "A" }
+	datamap { B = { y = "x" } }
+	local gety = transaction():read("B.y")
+	simulate {
+		function()
+			assert(gety() == 123)
+		end
+	}
+end

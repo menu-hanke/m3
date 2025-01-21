@@ -41,10 +41,12 @@ local m3 = {
 	wait           = function() if mp then mp.wait() end end,
 	database       = sqlite.database,
 	datadef        = sqlite.datadef,
+	datamap        = sqlite.datamap,
+	escapesql      = sqlite.escape,
+	rename         = sqlite.rename,
+	schema         = sqlite.schema,
 	sql            = sqlite.sql,
-	sql_escape     = sqlite.escape,
-	sql_schema     = sqlite.schema,
-	sql_statement  = sqlite.statement,
+	statement      = sqlite.statement,
 	uid            = uid.uid
 }
 

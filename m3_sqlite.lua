@@ -27,6 +27,9 @@ local global_backlogstate = ffi.new [[
 	}
 ]]
 
+-- name mangling map
+local global_namemap = {}
+
 ---- Query builder -------------------------------------------------------------
 
 local function sql(fragment, ...)
@@ -97,6 +100,35 @@ end
 local function escape(str)
 	-- TODO
 	return str
+end
+
+---- Name mangling -------------------------------------------------------------
+
+local function datamap(mangle)
+	if type(mangle) == "table" then
+		local names = mangle
+		mangle = function(tab, col)
+			local v = names[tab]
+			if col then
+				if type(v) == "table" then
+					return v[col]
+				elseif type(v) == "function" then
+					return v(col)
+				end
+			elseif type(v) == "string" then
+				return v
+			end
+		end
+	end
+	table.insert(global_namemap, mangle)
+end
+
+local function rename(tab, col)
+	for i=#global_namemap, 1, -1 do
+		local name = global_namemap[i](tab, col)
+		if name then return name end
+	end
+	return col or tab
 end
 
 ---- Low-level API -------------------------------------------------------------
@@ -526,6 +558,8 @@ shutdown(disconnect)
 return {
 	sql        = sql,
 	escape     = escape,
+	datamap    = datamap,
+	rename     = rename,
 	database   = database,
 	datadef    = datadef,
 	schema     = schema,

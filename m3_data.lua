@@ -1043,13 +1043,14 @@ function emit_write.autoselect(ctx, asel, value)
 		local values, cols = {}, {}
 		for k,v in pairs(asel.obj.fields) do
 			if gettag(v) ~= "size" then
-				table.insert(cols, sqlite.escape(k))
+				table.insert(cols, sqlite.escape(sqlite.rename(asel.tab, k)))
 				table.insert(values, v)
 			end
 		end
 		if #cols == 0 then return end
 		local name = ctx:name()
-		local sql = {sqlite.sql("SELECT", unpack(cols)), sqlite.sql("FROM", asel.tab), asel.sql}
+		local sql = {sqlite.sql("SELECT", unpack(cols)),
+			sqlite.sql("FROM", sqlite.escape(sqlite.rename(asel.tab))), asel.sql}
 		ctx.uv.assert = assert
 		ctx.buf:putf(
 			"local %s = %s.sqlite3_stmt\n%s:bindargs(%s)\nassert(%s:step(), 'query returned no rows')\n",
@@ -1062,13 +1063,16 @@ function emit_write.autoselect(ctx, asel, value)
 		end
 		ctx.buf:putf("%s:reset()\n", name)
 	elseif tag == "dataframe" then
-		local schema = sqlite.schema(asel.tab)
+		local tname = sqlite.rename(asel.tab)
+		local schema = sqlite.schema(tname)
+		tname = sqlite.escape(tname)
 		local cols, names, dummies = {}, {}, {}
 		for name,col in pairs(asel.obj.columns) do
 			if col.mark then
 				if schema.columns[name] then
 					table.insert(cols, col)
-					table.insert(names, string.format("%s.%s", asel.tab, sqlite.escape(name)))
+					table.insert(names, string.format("%s.%s", tname,
+						sqlite.escape(sqlite.rename(asel.tab, name))))
 				elseif col.dummy ~= nil then
 					table.insert(dummies, col)
 				else
@@ -1085,7 +1089,7 @@ function emit_write.autoselect(ctx, asel, value)
 			names[1] = "0"
 		end
 		local ptr = ctx.uv[asel.obj.slot.ptr]
-		local sql = {sqlite.sql("SELECT", unpack(names)), sqlite.sql("FROM", asel.tab), asel.sql}
+		local sql = {sqlite.sql("SELECT", unpack(names)), sqlite.sql("FROM", tname), asel.sql}
 		ctx.buf:putf(
 			"for row in %s:rows(%s) do\nlocal idx = %s:alloc()\n",
 			ctx.uv[sqlite.statement(sql)],
@@ -1580,10 +1584,11 @@ end
 local function transaction_autoselect(transaction, tab)
 	return transaction_action(transaction, function(action)
 		for _,t in ipairs(D.mapping_tables) do
-			local name = tostring(t.name)
+			local tname = tostring(t.name)
+			local name = sqlite.rename(tname)
 			local sqlt = sqlite.schema(name)
 			if sqlt then
-				local sql, bind = tab(name, sqlt)
+				local sql, bind = tab(sqlt, t)
 				if sql then
 					local obj = D.mapping[t]
 					if gettag(obj) == "struct" then
@@ -1593,13 +1598,13 @@ local function transaction_autoselect(transaction, tab)
 						-- a partial write for a dataframe will fail at runtime.
 						local new = struct()
 						for k,v in pairs(obj.fields) do
-							if sqlt.columns[k] then
+							if sqlt.columns[sqlite.rename(tname, k)] then
 								new.fields[k] = v
 							end
 						end
 						obj = new
 					end
-					action(bind or splat(), autoselect(obj, name, sql))
+					action(bind or splat(), autoselect(obj, tname, sql))
 				end
 			end
 		end

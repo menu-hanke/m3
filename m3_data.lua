@@ -134,7 +134,7 @@ end
 -- varargs
 local splat_mt = newmeta "splat"
 local function splat(values)
-	return setmetatable({ values = values }, splat_mt)
+	return setmetatable({ values = values or {} }, splat_mt)
 end
 
 -- constant value
@@ -181,8 +181,8 @@ end
 
 -- orm-style automagic sql SELECT
 local autoselect_mt = newmeta "autoselect"
-local function autoselect(obj, tab, sql)
-	return setmetatable({obj=obj, tab=tab, sql=sql}, autoselect_mt)
+local function autoselect(obj, tab, sql, rename)
+	return setmetatable({obj=obj, tab=tab, sql=sql, rename=rename}, autoselect_mt)
 end
 
 -- pipe
@@ -863,6 +863,12 @@ local function newvar(ctx, value)
 	return name
 end
 
+-- reading an empty splat returns "", this converts it to at least one (but possibly more) value(s)
+local function tovalue(v)
+	if v == "" then return "nil" end
+	return v
+end
+
 local emit_read = {}
 local emitread
 
@@ -878,7 +884,7 @@ end
 function emit_read.struct(ctx, struct)
 	local result = newvar(ctx, "{}")
 	for k,v in pairs(struct.fields) do
-		ctx.buf:putf("%s%s = %s\n", result, code.index(ctx.uv, k), emitread(ctx, v))
+		ctx.buf:putf("%s%s = %s\n", result, code.index(ctx.uv, k), tovalue(emitread(ctx, v)))
 	end
 	return result
 end
@@ -901,12 +907,12 @@ function emit_read.size(ctx, size)
 end
 
 function emit_read.splat(ctx, splat)
-	if #splat.values == 0 then
-		return "nil"
-	end
 	local results = {}
 	for i,v in ipairs(splat.values) do
-		results[i] = emitread(ctx, v)
+		local r = emitread(ctx, v)
+		if r ~= "" then
+			results[i] = r
+		end
 	end
 	return table.concat(results, ", ")
 end
@@ -940,7 +946,7 @@ local emitwrite
 
 function emit_write.memslot(ctx, slot, value)
 	local ptr = ctx.uv[slot.ptr]
-	if value then
+	if value and value ~= "" then
 		ctx.buf:putf("if %s ~= nil then %s[0] = %s end\n", value, ptr, value)
 	end
 	if (not value) or ctype_isstruct(slot.ctype) then
@@ -950,6 +956,7 @@ end
 
 function emit_write.struct(ctx, struct, value)
 	assert(value, "cannot mutate struct")
+	if value == "" then return end
 	local vname = ctx:name()
 	local result
 	for k,v in pairs(struct.fields) do
@@ -982,7 +989,7 @@ end
 
 function emit_write.dataframe(ctx, df, value)
 	local ptr = ctx.uv[df.slot.ptr]
-	if value then
+	if value and value ~= "" then
 		ctx.buf:putf("if %s ~= nil then %s:settab(%s) end\n", value, ptr, value)
 	end
 	return ptr
@@ -994,7 +1001,7 @@ function emit_write.splat(ctx, splat, value)
 	for i=1, #splat.values do
 		names[i] = ctx:name()
 	end
-	ctx.buf:putf("local %s = %s\n", table.concat(names, ", "), value)
+	ctx.buf:putf("local %s = %s\n", table.concat(names, ", "), tovalue(value))
 	local results = {}
 	local haveresults = false
 	for i,v in ipairs(splat.values) do
@@ -1017,7 +1024,7 @@ local function emitbufcall(ctx, n, trampoline, value)
 	)
 	for i=1, n do ctx.buf:putf(", %s[idx+%d]", state, i+1) end
 	ctx.buf:putf(" = %s", ctx.uv[trampoline])
-	if n > 0 then ctx.buf:putf(", %s", value) end
+	if n > 0 then ctx.buf:putf(", %s", tovalue(value)) end
 	ctx.buf:put(" end\n")
 end
 
@@ -1033,29 +1040,27 @@ end
 -- (ie. stmt_buffer)
 function emit_write.dml(ctx, dml, value)
 	local args = ctx.uv[sqlite.statement(dml.sql)]
-	if dml.n > 0 then args = string.format("%s, %s", args, value) end
+	if dml.n > 0 then args = string.format("%s, %s", args, tovalue(value)) end
 	emitbufcall(ctx, 1+dml.n, abuf_action(stmt_buffer, 1+dml.n), args)
 end
 
 function emit_write.autoselect(ctx, asel, value)
 	assert(value, "cannot mutate autoselect")
 	local tag = gettag(asel.obj)
-	local tname = sqlite.rename(asel.tab)
-	local schema = sqlite.schema(tname)
+	local schema = sqlite.schema(asel.tab)
 	if tag == "struct" then
 		local values, cols = {}, {}
 		for k,v in pairs(asel.obj.fields) do
 			if gettag(v) ~= "size" then
-				local colname = sqlite.rename(asel.tab, k)
-				local col = schema and schema.columns[colname]
-				table.insert(cols, sqlite.escape(colname))
-				table.insert(values, {value=v, null=col and col.nullable})
+				local col = asel.rename(k)
+				table.insert(cols, sqlite.escape(col))
+				table.insert(values, {value=v, null=schema.columns[col].nullable})
 			end
 		end
 		if #cols == 0 then return end
 		local name = ctx:name()
 		local sql = {sqlite.sql("SELECT", unpack(cols)),
-			sqlite.sql("FROM", sqlite.escape(tname)), asel.sql}
+			sqlite.sql("FROM", sqlite.escape(asel.tab)), asel.sql}
 		ctx.uv.assert = assert
 		ctx.buf:putf(
 			"local %s = %s.sqlite3_stmt\n%s:bindargs(%s)\nassert(%s:step(), 'query returned no rows')\n",
@@ -1065,7 +1070,7 @@ function emit_write.autoselect(ctx, asel, value)
 		)
 		for i=1, #cols do
 			if values[i].null then
-				ctx.buf:putf("do local v = %s:optdouble(%d) if v then\n", name, i-1)
+				ctx.buf:putf("do local v = %s:col(%d) if v then\n", name, i-1)
 				emitwrite(ctx, values[i].value, "v")
 				ctx.buf:put("end end\n")
 			else
@@ -1074,17 +1079,16 @@ function emit_write.autoselect(ctx, asel, value)
 		end
 		ctx.buf:putf("%s:reset()\n", name)
 	elseif tag == "dataframe" then
-		tname = sqlite.escape(tname)
+		local tname = sqlite.escape(asel.tab)
 		local cols, names, dummies, nulls = {}, {}, {}, {}
 		for name,c in pairs(asel.obj.columns) do
 			if c.mark then
-				local colname = sqlite.rename(asel.tab, name)
+				local colname = asel.rename(name)
 				local col = schema.columns[colname]
 				if col then
 					if col.null and c.dummy ~= nil then nulls[c] = true end
 					table.insert(cols, c)
-					table.insert(names, string.format("%s.%s", tname,
-						sqlite.escape(sqlite.rename(asel.tab, name))))
+					table.insert(names, string.format("%s.%s", tname, sqlite.escape(colname)))
 				elseif c.dummy ~= nil then
 					table.insert(dummies, c)
 				else
@@ -1110,11 +1114,10 @@ function emit_write.autoselect(ctx, asel, value)
 		)
 		for i,c in ipairs(cols) do
 			ctx.buf:putf("%s.%s[idx] = ", ptr, c.name)
-			local isfp = cdata.isfp(c.ctype)
 			if nulls[c] then
-				ctx.buf:putf("row:%s(%d) or %s\n", isfp and "optdouble" or "optint", i-1, ctx.uv[c.dummy])
+				ctx.buf:putf("row:col(%d) or %s\n", i-1, ctx.uv[c.dummy])
 			else
-				ctx.buf:putf("row:%s(%d)\n", isfp and "double" or "int", i-1)
+				ctx.buf:putf("row:%s(%d)\n", cdata.isfp(c.ctype) and "double" or "int", i-1)
 			end
 		end
 		for _,c in ipairs(dummies) do
@@ -1152,12 +1155,12 @@ function emit_write.ret(ctx, ret, value)
 	assert(value, "cannot mutate return value")
 	local idx = ret.idx or ctx.nret+1
 	ctx.nret = math.max(ctx.nret, idx)
-	ctx.buf:putf("local ret%d = %s\n", idx, value)
+	ctx.buf:putf("local ret%d = %s\n", idx, tovalue(value))
 end
 
 function emit_write.mutate(ctx, mut, value)
 	ctx.buf:putf("%s(%s", ctx.uv[mut.f], emitwrite(ctx, mut.data))
-	if value then
+	if value and value ~= "" then
 		ctx.buf:putf(", %s", value)
 	end
 	ctx.buf:put(")\n")
@@ -1520,6 +1523,12 @@ local function transaction_define(transaction, src)
 	return transaction
 end
 
+local function transaction_include(transaction, name)
+	-- TODO(fhk): see above
+	include(name)
+	return transaction
+end
+
 local function transaction_bind(transaction, name, value)
 	error("TODO(fhk): query-vset variables")
 end
@@ -1548,6 +1557,13 @@ local function transaction_mutate(transaction, data, f, ...)
 	return transaction_action(transaction, {
 		input  = splat({...}),
 		output = mutate(data, f)
+	})
+end
+
+local function transaction_set(transaction, output, input)
+	return transaction_action(transaction, {
+		input  = input,
+		output = output
 	})
 end
 
@@ -1593,15 +1609,28 @@ local function transaction_sql_insert(transaction, tab, values)
 	end
 end
 
-local function transaction_autoselect(transaction, tab)
+local function identcol(col)
+	return col
+end
+
+local function tocolsfunc(col)
+	if type(col) == "table" then
+		return function(name) return col[name] or col end
+	elseif not col then
+		return identcol
+	else
+		return col
+	end
+end
+
+local function transaction_autoselect(transaction, selector)
 	return transaction_action(transaction, function(action)
 		for _,t in ipairs(D.mapping_tables) do
-			local tname = tostring(t.name)
-			local name = sqlite.rename(tname)
-			local sqlt = sqlite.schema(name)
-			if sqlt then
-				local sql, bind = tab(sqlt, t)
-				if sql then
+			local tab, sql, bind, cols = selector(tostring(t.name))
+			if tab then
+				local schema = sqlite.schema(tab)
+				if schema then
+					cols = tocolsfunc(cols)
 					local obj = D.mapping[t]
 					if gettag(obj) == "struct" then
 						-- only select fields that exist in the schema.
@@ -1610,13 +1639,13 @@ local function transaction_autoselect(transaction, tab)
 						-- a partial write for a dataframe will fail at runtime.
 						local new = struct()
 						for k,v in pairs(obj.fields) do
-							if sqlt.columns[sqlite.rename(tname, k)] then
+							if schema.columns[cols(k)] then
 								new.fields[k] = v
 							end
 						end
 						obj = new
 					end
-					action(bind or splat(), autoselect(obj, tname, sql))
+					action(bind or splat(), autoselect(obj, tab, sql, cols))
 				end
 			end
 		end
@@ -1630,10 +1659,12 @@ local transaction_mt = {
 		insert     = transaction_insert,
 		delete     = transaction_delete,
 		define     = transaction_define,
+		include    = transaction_include,
 		bind       = transaction_bind,
 		read       = transaction_read,
 		write      = transaction_write,
 		mutate     = transaction_mutate,
+		set        = transaction_set,
 		call       = transaction_call,
 		sql        = transaction_sql,
 		sql_insert = transaction_sql_insert,
@@ -1699,6 +1730,7 @@ return {
 	memslot       = memslot,
 	arg           = arg,
 	ret           = ret,
+	splat         = splat,
 	func          = func,
 	pipe          = pipe,
 	commit        = abuf_commit,

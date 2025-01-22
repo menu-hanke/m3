@@ -74,7 +74,7 @@ if test "data:sql:input-tab:*" then
 	]]
 	define "table A"
 	if test "data:sql:input-tab:explicit" then
-		input "A"
+		data "SELECT rowid AS A_rowid FROM A"
 	else
 		test "data:sql:input-tab:implicit"
 	end
@@ -87,7 +87,7 @@ if test "data:sql:input-tab:*" then
 end
 
 if test "data:sql:input-not-unique" then
-	test(false, "cannot determine input table")
+	test(false, "cannot determine task")
 	datadef [[
 		CREATE TABLE A(x REAL);
 		CREATE TABLE B(x REAL);
@@ -104,8 +104,12 @@ if test "data:sql:datamap" then
 		INSERT INTO A(x) VALUES (123);
 	]]
 	define "table B"
-	datamap { B = "A" }
-	datamap { B = { y = "x" } }
+	data {
+		B = {
+			table = "A",
+			map = { y = "x" }
+		}
+	}
 	local gety = transaction():read("B.y")
 	simulate {
 		function()

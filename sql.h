@@ -28,6 +28,8 @@ CDEF double sqlite3_column_double(sqlite3_stmt *, int);
 CDEF int sqlite3_column_int(sqlite3_stmt *, int);
 CDEF const char *sqlite3_column_text(sqlite3_stmt *, int);
 CDEF int sqlite3_column_type(sqlite3_stmt *, int);
+CDEF int sqlite3_column_count(sqlite3_stmt *);
+CDEF const char *sqlite3_column_name(sqlite3_stmt *, int);
 
 CDEF const char *sqlite3_sql(sqlite3_stmt *);
 CDEF int sqlite3_bind_parameter_count(sqlite3_stmt *);

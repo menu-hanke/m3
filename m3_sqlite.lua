@@ -11,7 +11,9 @@ local select, type = select, type
 local SQLITE_TRANSIENT = ffi.cast("void *", -1)
 local SQLITE_ROW  = 100
 local SQLITE_DONE = 101
-local SQLITE_NULL = 5
+local SQLITE_INTEGER = 1
+local SQLITE_FLOAT = 2
+local SQLITE_TEXT = 3
 
 local MAX_BACKLOG = 1000
 
@@ -31,9 +33,6 @@ local global_backlogstate = ffi.new [[
 		int32_t size;
 	}
 ]]
-
--- name mangling map
-local global_namemap = {}
 
 ---- Query builder -------------------------------------------------------------
 
@@ -70,7 +69,14 @@ local function sqltostr(sql)
 	local buf = buffer.new()
 	if ctx.SELECT then
 		buf:put("SELECT ")
-		putlist(buf, ctx.SELECT)
+		for i,v in ipairs(ctx.SELECT) do
+			if i>1 then buf:put(",") end
+			if type(v) == "string" then
+				buf:put(v)
+			elseif v.fragment == "AS" then
+				buf:put(v[1], " AS ", v[2])
+			end
+		end
 		if ctx.FROM then
 			buf:put(" FROM ")
 			putlist(buf, ctx.FROM)
@@ -105,35 +111,6 @@ end
 local function escape(str)
 	-- TODO
 	return str
-end
-
----- Name mangling -------------------------------------------------------------
-
-local function datamap(mangle)
-	if type(mangle) == "table" then
-		local names = mangle
-		mangle = function(tab, col)
-			local v = names[tab]
-			if col then
-				if type(v) == "table" then
-					return v[col]
-				elseif type(v) == "function" then
-					return v(col)
-				end
-			elseif type(v) == "string" then
-				return v
-			end
-		end
-	end
-	table.insert(global_namemap, mangle)
-end
-
-local function rename(tab, col)
-	for i=#global_namemap, 1, -1 do
-		local name = global_namemap[i](tab, col)
-		if name then return name end
-	end
-	return col or tab
 end
 
 ---- Low-level API -------------------------------------------------------------
@@ -208,6 +185,7 @@ local function stmt_bindargs(stmt, ...)
 	else
 		stmt_bind(stmt, nil, {...})
 	end
+	event("sql", stmt, ...)
 end
 
 local function stmt_reset(stmt)
@@ -231,13 +209,11 @@ end
 
 local function stmt_rows(stmt, ...)
 	stmt_bindargs(stmt, ...)
-	event("sql", stmt, ...)
 	return stmt_step, stmt
 end
 
 local function stmt_exec(stmt, ...)
 	stmt_bindargs(stmt, ...)
-	event("sql", stmt, ...)
 	if stmt_step(stmt) then
 		stmt_reset(stmt)
 	end -- else: stmt_step() already called reset
@@ -248,20 +224,26 @@ local function stmt_text(stmt, i)
 	if p ~= nil then return ffi.string(p) end
 end
 
+local function stmt_col(stmt, i)
+	local ty = C.sqlite3_column_type(stmt, i)
+	if ty == SQLITE_INTEGER then
+		return (C.sqlite3_column_int(stmt, i))
+	elseif ty == SQLITE_FLOAT then
+		return (C.sqlite3_column_double(stmt, i))
+	elseif ty == SQLITE_TEXT then
+		return stmt_text(stmt, i)
+	end
+end
+
+local function stmt_name(stmt, i)
+	local name = C.sqlite3_column_name(stmt, i)
+	if name ~= nil then
+		return ffi.string(name)
+	end
+end
+
 local function stmt_sql(stmt)
 	return ffi.string(C.sqlite3_sql(stmt))
-end
-
-local function stmt_optdouble(stmt, i)
-	if C.sqlite3_column_type(stmt, i) ~= SQLITE_NULL then
-		return (C.sqlite3_column_double(stmt, i))
-	end
-end
-
-local function stmt_optint(stmt, i)
-	if C.sqlite3_column_type(stmt, i) ~= SQLITE_NULL then
-		return (C.sqlite3_column_int(stmt, i))
-	end
 end
 
 ffi.metatype("sqlite3_stmt", {
@@ -269,6 +251,7 @@ ffi.metatype("sqlite3_stmt", {
 		bind       = stmt_bind,
 		bindargs   = stmt_bindargs,
 		paramcount = C.sqlite3_bind_parameter_count,
+		colcount   = C.sqlite3_column_count,
 		reset      = stmt_reset,
 		finalize   = stmt_finalize,
 		step       = stmt_step,
@@ -276,9 +259,9 @@ ffi.metatype("sqlite3_stmt", {
 		exec       = stmt_exec,
 		double     = C.sqlite3_column_double,
 		int        = C.sqlite3_column_int,
-		optdouble  = stmt_optdouble,
-		optint     = stmt_optint,
 		text       = stmt_text,
+		col        = stmt_col,
+		name       = stmt_name,
 		sql        = stmt_sql
 	}
 })
@@ -341,9 +324,10 @@ end
 local function reftab_columns(tab)
 	local columns = {}
 	for row in tab.conn:rows(string.format("PRAGMA table_xinfo(%s)", tab.name)) do
-		local name = row:text(1)
-		local notnull = row:int(3)
-		columns[name] = { nullable = notnull == 0 }
+		columns[row:text(1)] = {
+			nullable = row:int(3) == 0,
+			pk = row:int(5) == 1
+		}
 	end
 	return columns
 end
@@ -354,9 +338,9 @@ local function reftab_fks(tab)
 	for row in tab.conn:rows(string.format("PRAGMA foreign_key_list(%s)", tab.name)) do
 		if row:int(1) == 0 then
 			table.insert(fks, cur)
-			cur = { table=row:text(2), fields={} }
+			cur = { table=row:text(2), columns={} }
 		end
-		table.insert(cur.fields, {from=row:text(3), to=row:text(4)})
+		cur.columns[row:text(3)] = row:text(4)
 	end
 	table.insert(fks, cur)
 	return fks
@@ -574,8 +558,6 @@ shutdown(disconnect)
 return {
 	sql        = sql,
 	escape     = escape,
-	datamap    = datamap,
-	rename     = rename,
 	database   = database,
 	datadef    = datadef,
 	schema     = schema,

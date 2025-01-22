@@ -1248,7 +1248,7 @@ local function compiletransaction(tx, graph_instance)
 	if ctx.nret > 0 then
 		buf:put("return ret1")
 		for i=2, ctx.nret do
-			buf:put(", ret%d", i)
+			buf:putf(", ret%d", i)
 		end
 		buf:put("\n")
 	end

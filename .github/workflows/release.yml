@@ -9,11 +9,17 @@ permissions:
 
 jobs:
   windows:
-    runs-on: windows-2022
+    runs-on: windows-2025
     steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: make zip git mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-tcl
       - run: git clone --depth 1 --recurse-submodules --shallow-submodules https://oauth2:${{github.token}}@github.com/menu-hanke/m3 .
+        shell: msys2 {0}
       - run: scripts/release-windows.sh
-        shell: C:\shells\msys2bash.cmd {0}
+        shell: msys2 {0}
       - uses: softprops/action-gh-release@v2
         with:
           files: m3-*.zip

@@ -8,6 +8,10 @@ local ffi = require "ffi"
 local C = ffi.C
 local select, type = select, type
 
+-- note: currently sqlite3_shutdown() is never called. maybe maintain a global refcount and call
+-- it on m3_shutdown if refcount drops to zero?
+C.sqlite3_initialize()
+
 local SQLITE_TRANSIENT = ffi.cast("void *", -1)
 local SQLITE_ROW  = 100
 local SQLITE_DONE = 101
@@ -15,7 +19,9 @@ local SQLITE_INTEGER = 1
 local SQLITE_FLOAT = 2
 local SQLITE_TEXT = 3
 
+-- TODO make these configurable
 local MAX_BACKLOG = 1000
+local BUSY_TIMEOUT = 5000
 
 local global_connection  -- sqlite3 *
 local global_schema -- reflect
@@ -412,6 +418,9 @@ end
 local function connection()
 	if not global_connection then
 		global_connection = sqlite3_open(global_maindb)
+		if BUSY_TIMEOUT then
+			global_connection:exec(string.format("PRAGMA busy_timeout=%d", BUSY_TIMEOUT))
+		end
 		for _,dd in ipairs(global_datadef) do
 			dd(global_connection)
 		end

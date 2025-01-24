@@ -1,119 +1,68 @@
-#-------------------------------------------------------------------------------#
-# m3 makefile.                                                                  #
-#-------------------------------------------------------------------------------#
+# ---- Configuration ------------------------------------------------------------------
 
 # programs
+CROSS          =
 CC             = $(CROSS)gcc
 AR             = $(CROSS)gcc-ar
 STRIP          = $(CROSS)strip
-LUAJIT         = $(LJLUAPATH) $(LJBINARY)
+CARGO          = cargo
+GIT            = git
+LUAJIT         = $(LUAJIT_JITPATH) $(LUAJIT_EXE)
 
 # embed lua bytecode? [y]/n
-LINKLUA        = y
+EMBEDLUA       = y
 
 # embed jit.* lua bytecode? [y]/n
-LINKJIT        = y
+EMBEDJIT       = y
 
-# enable debugging? y/[n]
-DEBUG          = n
-
-# ---- Platform & cross-compiler -----------------------------------------------
-
-TARGET         = $(HOST)
-CROSS          =
-
-ifneq (,$(findstring Windows,$(OS)))
-HOST           = Windows
-else
-HOST           = $(shell uname -s)
-endif
-
-M3_A           = libm3.a
-ifeq (Windows,$(TARGET))
-M3_EXE         = m3.exe
-M3_SO          = m3.dll
-else
-M3_EXE         = m3
-M3_SO          = libm3.so
-endif
-
-ifeq (Windows,$(HOST))
-HOST_EXE       = .exe
-endif
-
-# note: this works only when TARGET=HOST.
-TARGET_JITARCH = $(shell $(LUAJIT) -e print\(jit.arch\))
-
-# ---- fhk ---------------------------------------------------------------------
-
-FHKPATH        = fhk5
-FHKA           = fhk5/target/release/libfhk.a
-ifeq (Windows,$(TARGET))
-FHKDLL         = fhk5/target/release/fhk.dll
-M3EXE_FHK      = $(FHKDLL)
-else
-FHKDLL         = fhk5/target/release/libfhk.so
-M3EXE_FHK      = -Wl,--whole-archive $(FHKA) -Wl,--no-whole-archive
-endif
-
-# ---- LuaJIT ------------------------------------------------------------------
-
-LJSRC          = LuaJIT/src
-LJBINARY       = $(LJSRC)/luajit$(HOST_EXE)
-LJPKGPATH      = $(shell $(LJBINARY) -e print\(package.path\));$(LJSRC)/?.lua
-LJLUAPATH      = LUA_PATH="$(LJPKGPATH)"
-LJINCLUDE      = -ILuaJIT/src
-LJA            = $(LJSRC)/libluajit.a
-ifeq (Windows,$(TARGET))
-LJDLL          = $(LJSRC)/lua51.dll
-M3EXE_LUAJIT   = $(LJDLL)
-M3SO_LUAJIT    = $(LJDLL)
-else
-LJDLL          = $(LJSRC)/libluajit.so
-M3EXE_LUAJIT   = $(LJA) -lm -ldl
-M3SO_LUAJIT    = $(LJDLL)
-endif
-
-# ---- SQLite ------------------------------------------------------------------
-
-SQLITESRC      = sqlite
-SQLITE3H       = $(SQLITESRC)/sqlite3.h
-SQLITE3C       = $(SQLITESRC)/sqlite3.c
-SQLITEINCLUDE  = -I$(SQLITESRC)
-ifeq (Windows,$(TARGET))
-# TODO
-else
-M3EXE_SQLITE   = $(SQLITESRC)/sqlite3.o
-M3SO_SQLITE    = $(SQLITESRC)/sqlite3.pic.o
-endif
+# target system (for cross-compiler)
+TARGET_SYS     = $(HOST_SYS)
 
 # ---- Compiler & Linker options -----------------------------------------------
 
-ifneq (y,$(DEBUG))
-XCFLAGS        = -Wall -Wextra -O2 -DNDEBUG
-else
-XCFLAGS        = -Wall -Wextra -O0 -g3 -DM3_DEBUG
-endif
+CCOPT          = -O2
+CCWARN         = -Wall -Wextra
+CCDEBUG        =
 
-ifeq (y,$(DEBUG))
+CCOPTIONS      = $(CCOPT) $(CCWARN) $(CFLAGS) $(XCFLAGS)
+LDOPTIONS      = -Wl,--gc-sections $(LDFLAGS)
+
+ifneq (,$(CCDEBUG))
 STRIP          = :
 endif
 
-ifneq (Windows,$(TARGET))
-M3EXE_SYMS     = -Wl,--dynamic-list=dynamic.list
+# ---- Host & target detection -------------------------------------------------
+
+ifneq (,$(findstring Windows,$(OS)))
+HOST_SYS       = Windows
+else
+HOST_SYS       = $(shell uname -s)
 endif
 
-CCOPTIONS      = $(XCFLAGS) $(LJINCLUDE) $(SQLITEINCLUDE) $(CFLAGS)
-LDOPTIONS      = -Wl,--gc-sections $(LDFLAGS)
+TARGET_MACHINE = $(shell $(CC) -dumpmachine)
+ifneq (,$(findstring x86_64,$(TARGET_MACHINE)))
+TARGET_ARCH    = x64
+endif # else: add as needed
 
-# ---- Objects -----------------------------------------------------------------
+# ---- Files and paths ---------------------------------------------------------
+
+ifeq (Windows,$(TARGET_SYS))
+TARGET_EXE     = .exe
+TARGET_SO      = .dll
+else
+TARGET_SO      = .so
+endif
+
+M3_A           = m3.a
+M3_EXE         = m3$(TARGET_EXE)
+M3_SO          = m3$(TARGET_SO)
 
 M3EXE_O        = libm3.o m3.o
 M3SO_O         = libm3.pic.o
 M3A_O          = libm3.o
 M3GENLUA       = m3_cdef.lua
 
-ifeq (y,$(LINKLUA))
+ifeq (y,$(EMBEDLUA))
 M3LUA_O        = m3.lua.o m3_array.lua.o m3_cdata.lua.o m3_cdef.lua.o m3_code.lua.o \
 				 m3_constify.lua.o m3_control.lua.o m3_data.lua.o m3_debug.lua.o m3_loop.lua.o \
 				 m3_mem.lua.o m3_mp.lua.o m3_mp_main.lua.o m3_mp_worker.lua.o m3_shutdown.lua.o \
@@ -121,24 +70,72 @@ M3LUA_O        = m3.lua.o m3_array.lua.o m3_cdata.lua.o m3_cdef.lua.o m3_code.lu
 M3EXELUA_O     = m3_simulate.lua.o m3_test.lua.o
 endif
 
-ifeq (y,$(LINKJIT))
-JITLUA_O       = jit_bc.lua.o jit_dump.lua.o jit_p.lua.o jit_v.lua.o jit_vmdef.lua.o jit_zone.lua.o \
-				 jit_dis_$(TARGET_JITARCH).lua.o
+ifeq (y,$(EMBEDJIT))
+ifneq (,$(TARGET_ARCH))
+JITDIS_O       = jit_dis_$(TARGET_ARCH).lua.o
 ifeq (x64,$(TARGET_JITARCH))
-JITLUA_O      += jit_dis_x86.lua.o
+JITDIS_O      += jit_dis_x86.lua.o
 endif
 endif
+JITLUA_O       = jit_bc.lua.o jit_dump.lua.o jit_p.lua.o jit_v.lua.o jit_vmdef.lua.o jit_zone.lua.o \
+				 $(JITDIS_O)
+endif
+
+ifneq (Windows,$(TARGET_SYS))
+M3EXE_SYMS     = -Wl,--dynamic-list=dynamic.list
+endif
+
+# ---- fhk ---------------------------------------------------------------------
+
+FHK_ROOT       = fhk5
+FHK_A          = $(FHK_ROOT)/target/release/libfhk.a
+ifeq (Windows,$(TARGET_SYS))
+FHK_SO         = $(FHK_ROOT)/target/release/fhk.dll
+M3EXE_FHK      = $(FHK_SO)
+else
+FHK_SO         = $(FHK_ROOT)/target/release/libfhk.so
+M3EXE_FHK      = -Wl,--whole-archive $(FHK_A) -Wl,--no-whole-archive
+endif
+M3SO_FHK       = $(FHK_SO)
+
+# ---- LuaJIT ------------------------------------------------------------------
+
+LUAJIT_ROOT    = LuaJIT
+LUAJIT_SRC     = $(LUAJIT_ROOT)/src
+LUAJIT_A       = $(LUAJIT_SRC)/libluajit.a
+LUAJIT_EXE     = $(LUAJIT_SRC)/luajit$(TARGET_EXE)
+LUAJIT_PKGPATH = $(shell $(LUAJIT_EXE) -e print\(package.path\));$(LUAJIT_SRC)/?.lua
+LUAJIT_JITPATH = LUA_PATH="$(LUAJIT_PKGPATH)"
+LUAJIT_INCLUDE = -I$(LUAJIT_SRC)
+ifeq (Windows,$(TARGET_SYS))
+LUAJIT_SO      = $(LUAJIT_SRC)/lua51.dll
+M3EXE_LUAJIT   = $(LUAJIT_SO)
+else
+LUAJIT_SO      = $(LUAJIT_SRC)/libluajit.so
+M3EXE_LUAJIT   = $(LUAJIT_A) -lm -ldl
+endif
+M3SO_LUAJIT    = $(LUAJIT_SO)
+
+# ---- SQLite ------------------------------------------------------------------
+
+SQLITE_ROOT    = sqlite
+SQLITE_O       = $(SQLITE_ROOT)/sqlite3.o
+SQLITE_PICO    = $(SQLITE_ROOT)/sqlite3.pic.o
+SQLITE_INCLUDE = -I$(SQLITE_ROOT)
+M3EXE_SQLITE   = $(SQLITE_O)
+M3SO_SQLITE    = $(SQLITE_PICO)
+SQLITE_CFLAGS  = -DSQLITE_CUSTOM_INCLUDE=../sql.h
 
 # ---- Targets -----------------------------------------------------------------
 
-$(M3_EXE): $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O) $(M3GENLUA) $(M3EXE_SQLITE)
-	$(CC) $(LDOPTIONS) $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O) \
-		$(M3EXE_LUAJIT) $(M3EXE_FHK) $(M3EXE_SQLITE) $(M3EXE_SYMS) \
-		-o $@
+$(M3_EXE): $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O) $(M3GENLUA)
+	$(CC) $(LDOPTIONS) $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O)  $(M3EXE_FHK) \
+		$(M3EXE_LUAJIT) $(M3EXE_SQLITE) $(M3EXE_SYMS) -o $@
 	$(STRIP) $@
 
-$(M3_SO): $(M3SO_O) $(M3LUA_O) $(M3GENLUA) $(M3SO_SQLITE)
-	$(CC) $(LDOPTIONS) $(M3SO_O) $(M3LUA_O) $(M3SO_LUAJIT) $(M3SO_SQLITE) -shared -o $@
+$(M3_SO): $(M3SO_O) $(M3LUA_O) $(M3GENLUA)
+	$(CC) $(LDOPTIONS) $(M3SO_O) $(M3LUA_O) $(M3GENLUA_O) $(M3SO_FHK) $(M3SO_LUAJIT) \
+		$(M3SO_SQLITE) -shared -o $@
 	$(STRIP) $@
 
 $(M3_A): $(M3A_O) $(M3LUA_O) $(M3GENLUA)
@@ -155,29 +152,42 @@ $(M3_A): $(M3A_O) $(M3LUA_O) $(M3GENLUA)
 %.lua.c: %.lua
 	$(LUAJIT) -b -n $(subst _,.,$(notdir $*)) $< $@
 
-jit_%.lua.c: $(LJSRC)/jit/%.lua
+jit_%.lua.c: $(LUAJIT_SRC)/jit/%.lua
 	$(LUAJIT) -b -n jit.$* $< $@
 
 m3_cdef.lua: libm3.o
 	$(CC) -P -E -nostdinc -DM3_LUADEF libm3.c 2>/dev/null | $(LUAJIT) luadef.lua > $@
 
-loader.c:
-	$(BCLOADER) -o $(TARGET) -n m3 -c m3_api -L > $@
+CCGITVER = $(shell GITVER=$$($(GIT) describe) && echo -DM3_GITVER='\"'$$(echo $$GITVER)'\"')
+CCLJVER  = $(shell GITVER=$$(cd $(LUAJIT_ROOT) && $(GIT) describe) && echo -DLJ_GITVER='\"'$$(echo $$GITVER)'\"')
+m3.o: XCFLAGS += $(CCGITVER) $(CCLJVER) $(LUAJIT_INCLUDE) $(SQLITE_INCLUDE)
+$(SQLITE_O) $(SQLITE_PICO): XCFLAGS += $(SQLITE_CFLAGS)
 
-CCGITVER = $(shell GITVER=$$(git describe) && echo -DM3_GITVER='\"'$$(echo $$GITVER)'\"')
-CCLJVER  = $(shell GITVER=$$(cd $(LJSRC) && git describe) && echo -DLJ_GITVER='\"'$$(echo $$GITVER)'\"')
-m3.o: XCFLAGS += $(CCGITVER) $(CCLJVER)
+# ---- Dependencies ------------------------------------------------------------
+
+deps-fhk:
+	cd $(FHK_ROOT) && cargo build --release
+
+deps-luajit:
+	$(MAKE) -C $(LUAJIT_ROOT) amalg
+
+deps-sqlite:
+	cd $(SQLITE_ROOT) && ./configure && $(MAKE) sqlite3.c
+	$(MAKE) $(SQLITE_O) $(SQLITE_PICO)
+
+deps: deps-fhk deps-luajit deps-sqlite
+.PHONY: deps deps-fhk deps-luajit deps-sqlite
 
 # ---- Auxiliary ------------------------------------------------------------------
 
-.PHONY: dep
-dep:
+depend:
 	$(MAKE) clean
 	$(CC) -MM *.c > Makefile.dep
 
-.PHONY: clean
 clean:
 	$(RM) $(M3_EXE) $(M3GENLUA) *.o *.so *.dll *.a *.lua.c
+
+.PHONY: depend clean
 
 -include Makefile.dep
 

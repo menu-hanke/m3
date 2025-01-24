@@ -2,4 +2,3 @@ libm3.o: libm3.c def.h target.h mem.c mp.c sql.h
 m3.o: m3.c target.h
 mem.o: mem.c def.h target.h
 mp.o: mp.c target.h def.h
-sys.o: sys.c

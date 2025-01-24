@@ -328,7 +328,7 @@ local function map_var(node)
 		return
 	end
 	D.mapping[node] = mapping
-	local default = G:var(node.tab, "default'$", false, node.name)
+	local default = G:var(node.tab, "default'{$}", false, node.name)
 	if default then
 		node.m3_default = default
 		if not mapping.dummy then
@@ -1582,6 +1582,7 @@ local function transaction_sql(transaction, stmt, ...)
 end
 
 local function transaction_sql_insert(transaction, tab, values)
+	-- TODO: if the table does exist, this should ALTER TABLE instead
 	if type(values) == "table" then
 		local insert = {sqlite.sql("INSERT", tab)}
 		local args = {}

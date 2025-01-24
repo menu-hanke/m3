@@ -41,13 +41,6 @@
 #define CDEFFUNC             LUAFUNC
 #endif
 
-CDEF typedef int32_t m3_MRef32;
-CDEF typedef intptr_t m3_MRef;
-typedef m3_MRef32 MRef32;
-typedef m3_MRef MRef;
-#define mrefp(b,r) (((void*)(b)) + (ptrdiff_t)(r))  // mem ref to pointer
-#define pmref(b,p) ((intptr_t)(p) - (intptr_t)(b))  // pointer to mem ref
-
 #define VMSIZE_PROC 0x100000000ull
 LUADEF(cdef.M3_VMSIZE_DEFAULT = 0x80000000) // must fit in 32 bits
 LUADEF(cdef.M3_VMSIZE_PROC = VMSIZE_PROC)

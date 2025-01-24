@@ -352,7 +352,9 @@ static int setupstate(lua_State *L, SetupData *sd)
 		"package.loaded.fhk = luaopen_fhk()\n"
 		"package.loaded.m3_environment = {\n"
 		  "init = function() return setup(udata) end,\n"
+#if M3_LINUX
 		  "parallel = parallel == -1 and 'auto' or (parallel > 0 and parallel),\n"
+#endif
 		"}\n"
 		"require 'm3'\n"
 		"return require('m3_simulate').run\n"

@@ -1,4 +1,5 @@
 local ffi = require "ffi"
+local cdef = require "m3_cdef"
 
 local DUMMY = {
 	[tonumber(ffi.typeof "double")]   = 0/0,
@@ -30,8 +31,15 @@ local function isfp(ctype)
 	return ffi.istype("double", ctype) or ffi.istype("float", ctype)
 end
 
+local function check(e)
+	if e ~= 0 then
+		error(cdef.errmsg[e], 2)
+	end
+end
+
 return {
 	dummy = dummy,
 	ident = ident,
-	isfp  = isfp
+	isfp  = isfp,
+	check = check
 }

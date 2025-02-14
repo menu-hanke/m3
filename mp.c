@@ -4,6 +4,7 @@
 
 #define _GNU_SOURCE /* for sched_getaffinity */
 
+#include "config.h"
 #include "def.h"
 
 #include <lua.h>
@@ -88,7 +89,7 @@ CDEF typedef struct m3_Message {
 
 AINLINE static m3_Proc *mp_owner(void *ptr)
 {
-	return (m3_Proc *) ((uintptr_t)ptr & -VMSIZE_PROC);
+	return (m3_Proc *) ((uintptr_t)ptr & -M3_MP_PROC_MEMORY);
 }
 
 /* ---- Error "handling" ---------------------------------------------------- */

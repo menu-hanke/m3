@@ -1,5 +1,6 @@
 assert(require("m3_environment").parallel)
 
+local cdata = require "m3_cdata"
 local cdef = require "m3_cdef"
 local environment = require "m3_environment"
 local shutdown = require "m3_shutdown"
@@ -7,7 +8,7 @@ local ffi = require "ffi"
 local buffer = require "string.buffer"
 local C, cast, copy = ffi.C, ffi.cast, ffi.copy
 
-local VMSIZE_PROC = cdef.M3_VMSIZE_PROC
+local CONFIG_MP_PROC_MEMORY = cdef.CONFIG_MP_PROC_MEMORY
 
 local nproc = environment.parallel
 if nproc == "auto" then
@@ -21,12 +22,20 @@ end
 --   * main process heap
 --   * `environment.parallel` × worker heaps
 -- and one extra region for alignment
-local mapsize = VMSIZE_PROC*(nproc+3)
-local global_shared_mapping = C.m3__mem_map_shared(mapsize)
-local global_shared_base = bit.band(ffi.cast("intptr_t", global_shared_mapping)+(VMSIZE_PROC-1), bit.bnot(VMSIZE_PROC-1))
+local mapsize = CONFIG_MP_PROC_MEMORY*(nproc+3)
+local global_shared_mapping = (function()
+	local ptr = ffi.new("void *[1]")
+	cdata.check(C.m3_mem_map_shared(mapsize, ptr))
+	local map = ptr[0]
+	shutdown(function() C.m3_mem_unmap(map, mapsize) end)
+	return map
+end)()
+local global_shared_base = bit.band(
+	ffi.cast("intptr_t", global_shared_mapping)+(CONFIG_MP_PROC_MEMORY-1),
+	bit.bnot(CONFIG_MP_PROC_MEMORY-1)
+)
 local global_shared_mem = ffi.cast("m3_Shared *", global_shared_base)
 global_shared_mem.heap.cursor = global_shared_base + ffi.sizeof("m3_Shared")
-shutdown(function() C.m3__mem_unmap(global_shared_mapping, mapsize) end)
 
 local tmpsize_t = ffi.new("size_t[1]")
 local function heap_get_free(heap, size)
@@ -98,7 +107,7 @@ local function proc_init(hook)
 end
 
 proc_init(function(id)
-	proc_heap.cursor = global_shared_base + (id+1)*VMSIZE_PROC
+	proc_heap.cursor = global_shared_base + (id+1)*CONFIG_MP_PROC_MEMORY
 	-- proc must be the first thing in the heap
 	proc_ptr = ffi.cast("m3_Proc *", proc_heap:alloc(ffi.sizeof("m3_Proc")))
 end)

@@ -207,6 +207,17 @@ local function pprint(...)
 	trace(vpretty(select("#", ...) > 1 and "st" or "stni", "\t", ...))
 end
 
+local function describe(x)
+	if type(x) == "function" then
+		local info = debug.getinfo(x, "S")
+		return info.short_src:match("[^/]*$") .. ":" .. info.linedefined
+	end
+	if type(x) == "table" and require("m3_data").istransaction(x) then
+		return string.format("<transaction: %p>", x)
+	end
+	return tostring(x)
+end
+
 ---- trace messages ------------------------------------------------------------
 
 local function trace_data(objs)
@@ -223,16 +234,57 @@ local function trace_data(objs)
 	end
 end
 
-local function fpfmt(fp)
-	return -fp, require("m3_mem").arena.top+fp
+local function round(x,n)
+	if n then
+		return round(x*10^n)/10^n
+	else
+		if x - math.floor(x) >= 0.5 then
+			return math.ceil(x)
+		else
+			return math.floor(x)
+		end
+	end
+end
+
+local function prettysize(n)
+	if n < 2^10 then return string.format("%d bytes", n) end
+	if n < 2^20 then return string.format("%g KB", round(n/2^10, 2)) end
+	if n < 2^30 then return string.format("%g MB", round(n/2^20, 2)) end
+	return string.format("%g GB", round(n/2^30, 2))
+end
+
+local FRAME_MASKCHAR = { [0]="-", [1]="d", [2]="s", [3]="*" }
+
+local function trace_saveload(what, fp)
+	local state = require("m3_mem").state
+	local buf = buffer.new()
+	buf:putf("%s  [%d:", what, fp)
+	for i=0, state.wnum-1 do
+		local d = tonumber(bit.band(bit.rshift(state.ftab[fp].diff, i), 1))
+		local s = tonumber(bit.band(bit.rshift(state.ftab[fp].save, i), 1))
+		buf:put(FRAME_MASKCHAR[d+2*s])
+	end
+	buf:put("]")
+	local fp1 = fp
+	while true do
+		fp1 = state.ftab[fp1].prev
+		if fp1 == 0 then break end
+		buf:putf("<-%d", fp1)
+	end
+	local top = state.ftab[fp].chunktop
+	if top > 0 then
+		-- 16 = sizeof(ChunkMetadata), this rounds it back to a round multiple of page size
+		buf:putf(" (%s @ 0x%x)", prettysize(top+16), ffi.cast("intptr_t", state.ftab[fp].chunk))
+	end
+	trace(tostring(buf))
 end
 
 local function trace_save(fp)
-	trace(string.format("SAVE  0x%x (0x%x)", fpfmt(fp)))
+	trace_saveload("SAVE", fp)
 end
 
 local function trace_load(fp)
-	trace(string.format("LOAD  0x%x (0x%x)", fpfmt(fp)))
+	trace_saveload("LOAD", fp)
 end
 
 local function mask2str(mask)
@@ -253,8 +305,21 @@ local function trace_sql(stmt, ...)
 	trace(string.format("SQL   %s %s", stmt:sql(), vpretty("s", "\t", ...)))
 end
 
-local function trace_code(code)
-	trace(string.format("CODE  %s", code))
+local function trace_code(code, name)
+	trace(string.format("CODE  %.60s\n%s", name, code))
+end
+
+local function trace_alloc(size)
+	local state = require("m3_mem").state
+	trace(string.format("ALLOC %s/%s (+%s)",
+		prettysize(state.chunktop-state.cursor),
+		state.chunktop > 0 and prettysize(state.chunktop+16) or "0",
+		prettysize(size)
+	))
+end
+
+local function trace_gmap(def)
+	trace(string.format("GMAP  %s", def))
 end
 
 local trace_events = {
@@ -264,6 +329,8 @@ local trace_events = {
 	mask  = { mask="s", func=trace_mask },
 	sql   = { mask="q", func=trace_sql  },
 	code  = { mask="c", func=trace_code },
+	alloc = { mask="a", func=trace_alloc },
+	gmap  = { mask="g", func=trace_gmap }
 }
 
 local TRACE_ALL = "dsq"
@@ -308,5 +375,6 @@ return {
 	enabled  = enabled,
 	putpp    = putpp,
 	pretty   = pretty,
-	pprint   = pprint
+	pprint   = pprint,
+	describe = describe
 }

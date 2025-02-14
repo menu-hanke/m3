@@ -1,14 +1,19 @@
 local buffer = require "string.buffer"
 local event = require("m3_debug").event
 
+local function embedconst(x)
+	if type(x) == "string" then
+		return string.format("%q", x)
+	elseif x == x then
+		return tostring(x)
+	else
+		return "(0/0)"
+	end
+end
+
 local function uv__index(uv, v)
-	if type(v) == "nil" or type(v) == "boolean" then
-		return v
-	elseif type(v) == "number" then
-		if v ~= v then return "(0/0)" end
-		return v
-	elseif type(v) == "string" then
-		return string.format("%q", v)
+	if type(v) == "nil" or type(v) == "boolean" or type(v) == "number" or type(v) == "string" then
+		return embedconst(v)
 	else
 		local name = string.format("u%p", v)
 		uv[name] = v
@@ -80,13 +85,19 @@ end
 -- TODO: add descriptive chunk names for each call
 local function loadcode(...)
 	event("code", ...)
-	return load(...)
+	return assert(load(...))
+end
+
+local function chunkname(s)
+	return string.format("=m3: %s", s)
 end
 
 return {
+	embedconst   = embedconst,
 	emitupvalues = emitupvalues,
 	index        = index,
 	new          = new,
 	setupvalue   = setupvalue,
-	load         = loadcode
+	load         = loadcode,
+	chunkname    = chunkname
 }

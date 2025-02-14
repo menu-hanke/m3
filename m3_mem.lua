@@ -1,190 +1,155 @@
+local cdata = require "m3_cdata"
 local cdef = require "m3_cdef"
-local constify = require "m3_constify"
-local environment = require "m3_environment"
 local shutdown = require "m3_shutdown"
 local ffi = require "ffi"
-local C, cast, ffi_copy, typeof, sizeof, alignof, intptr_t, voidptr = ffi.C, ffi.cast, ffi.copy, ffi.typeof, ffi.sizeof, ffi.alignof, ffi.typeof("intptr_t"), ffi.typeof("void *")
-local band, bnot, tonumber = bit.band, bit.bnot, tonumber
+local C = ffi.C
+local band, bor, bnot = bit.band, bit.bor, bit.bnot
+local cast, copy = ffi.cast, ffi.copy
+local uintptr_t, voidptr, objidptr = ffi.typeof("uintptr_t"), ffi.typeof("void *"), ffi.typeof("int32_t *")
+local check = cdata.check
 local event = require("m3_debug").event
 
-local VMSIZE = environment.stack or cdef.M3_VMSIZE_DEFAULT
+local CONFIG_MEM_BLOCKSIZE_MIN = cdef.CONFIG_MEM_BLOCKSIZE_MIN
+local CONFIG_MEM_BLOCKNUM_MAX  = 64
+local TARGET_CACHELINE_SIZE = cdef.TARGET_CACHELINE_SIZE
+local SIZEOF_OBJID = 4
+local FRAME_OBJS = 1
+local FRAME_ALIVE = 2
+local FRAME_NOTALIVE = bnot(FRAME_ALIVE)
+local FRAME_ALIVEMASK = FRAME_ALIVE + FRAME_OBJS
+local FRAME_CHILD = 4
 
----- Mmap arenas ---------------------------------------------------------------
+local mem = ffi.gc(ffi.new("m3_Mem"), C.m3_mem_destroy)
 
-local function oom()
-	error("arena mapping out of memory")
-end
+-- explicit nil to ensure accesses are always compiled as array tables, even when nothing has
+-- been inserted yet
+local lref = { [0]=nil }
+local lfin = { [0]=nil }
 
-local function arena_bump(arena, size, align)
-	local cursor = band(arena.cursor-size, cast(intptr_t, -align))
-	arena.cursor = cursor
-	if cursor < arena.base then
-		arena:expand()
-	end
-	return cursor
-end
-
-local function arena_xbump(arena, size, align)
-	return (cast(voidptr, arena_bump(arena, size, align)))
-end
-
-local function arena_xrealloc(arena, oldptr, oldsize, newsize, align)
-	local newptr = arena_xbump(arena, newsize, align)
-	if oldsize > 0 then
-		ffi_copy(newptr, oldptr, oldsize)
-	end
-	return newptr
-end
-
--- ffi.typeof("$*", ...) isn't compiled, so this caches the results instead.
-local ctptr = {}
-
-local function typeofptr(ctype)
-	local ctid = tonumber(ctype)
-	local p = ctptr[ctid]
-	if not p then
-		p = typeof("$*", ctype)
-		ctptr[ctid] = p
-	end
-	return p
-end
-
-local function arena_new(arena, ctype)
-	ctype = typeof(ctype)
-	return (cast(typeofptr(ctype), arena_bump(arena, sizeof(ctype), alignof(ctype))))
-end
-
-local function arena_newarray(arena, ctype, num)
-	ctype = typeof(ctype)
-	return (cast(typeofptr(ctype), arena_bump(arena, num*sizeof(ctype), alignof(ctype))))
-end
-
-local arena_expand, arena_map, arena_unmap
-if cdef.M3_MEM_VIRTUALALLOC then
-
-	arena_map = function(arena, size)
-		arena.bottom = ffi.cast("intptr_t", C.m3__mem_map_arena(size))
-		arena.base = arena.bottom+size
-		arena.top = arena.base
-		arena.cursor = arena.base
-	end
-
-	arena_expand = function(arena)
-		if C.m3__mem_grow(arena) ~= 0 then
-			oom()
-		end
-	end
-
-	arena_unmap = function(arena)
-		C.m3__mem_unmap(cast(voidptr, arena.bottom))
-	end
-else
-
-	arena_map = function(arena, size)
-		arena.base = ffi.cast("intptr_t", C.m3__mem_map_arena(size))
-		arena.top = arena.base+size
-		arena.cursor = arena.top
-	end
-
-	arena_expand = oom
-
-	arena_unmap = function(arena)
-		C.m3__mem_unmap(ffi.cast("void *", arena.base), arena.top - arena.base)
-	end
-
-end
-
-ffi.metatype(
-	"m3_Arena",
-	{
-		__index = {
-			oom      = oom,
-			bump     = arena_bump,
-			xbump    = arena_xbump,
-			xrealloc = arena_xrealloc,
-			new      = arena_new,
-			newarray = arena_newarray,
-			expand   = arena_expand,
-			map      = arena_map,
-			unmap    = arena_unmap
-		}
-	}
-)
-
-local global_savestate = ffi.new("m3_SaveState")
-local global_scratch   = ffi.new("m3_Arena")
-
-global_savestate.arena:map(VMSIZE)
-global_scratch:map(VMSIZE)
-
-shutdown(function()
-	global_savestate.arena:unmap()
-	global_scratch:unmap()
-end)
-
----- Heap & savepoints ---------------------------------------------------------
-
-local heapsize = constify.new()
-local sstop = global_savestate.arena.top
-global_savestate.base = global_savestate.arena.top
-global_savestate.arena:new("uint64_t")[0] = 0
-global_savestate.mask = -1ull
-
-local function dirty(mask)
-	return band(global_savestate.mask, mask) ~= 0
-end
-
-local function setmask(mask)
-	if dirty(mask) then
-		event("mask", mask)
-		C.m3__mem_setmask(global_savestate, mask)
-	end
-end
-
-local function setheap(ptr, blocksize, num)
-	global_savestate.heap = shutdown(ptr, "anchor")
-	global_savestate.blocksize = blocksize
-	constify.set(heapsize, blocksize*num)
-end
-
--- note: iswritable() only works for the main arena.
--- if it's needed for the scratch arena too, then map both together
-local function iswritable(ptr)
-	return cast(intptr_t, ptr) < global_savestate.base
-end
-
--- TODO: only save if it's dirty, otherwise return current savepoint
 local function mem_save()
-	local cursor = band(global_savestate.arena.cursor, bnot(63))
-	cursor = cursor - heapsize()
-	global_savestate.arena.cursor = cursor-16
-	if global_savestate.arena.cursor < global_savestate.arena.base then
-		global_savestate.arena:expand()
-	end
-	cast("uint64_t *", cursor)[-1] = -1ull
-	cast("intptr_t *", cursor)[-2] = global_savestate.base
-	global_savestate.base = cursor
-	global_savestate.mask = -1ull
-	local fp = tonumber(cursor-sstop)
+	local fp = C.m3_mem_save(mem)
 	event("save", fp)
 	return fp
 end
 
--- TODO: load-and-pop
-local function mem_load(fp)
-	event("load", fp)
-	C.m3__mem_load(global_savestate, sstop+fp)
+local function mem_write(mask)
+	mem.diff = bor(mem.diff, mask)
+	if band(mem.unsaved, mask) ~= 0 then
+		C.m3_mem_write(mem, mask)
+	end
 end
 
---------------------------------------------------------------------------------
+local function mem_load(fp)
+	event("load", fp)
+	C.m3_mem_load(mem, fp)
+end
+
+local function detach(fp)
+	local prev = mem.ftab[fp].prev
+	local state = mem.ftab[prev].state - FRAME_CHILD
+	mem.ftab[prev].state = state
+	-- if fp == mem.frame then
+	-- 	-- C code maintains the invariant child.save ⊂  parent.save,
+	-- 	-- so the next time we do a load, we can just load the diff from the parent.
+	-- 	-- TODO: this doesn't work if the next save/load is a save because it can reuse this savepoint
+	-- 	mem.diff = bor(mem.diff, mem.ftab[fp].diff)
+	-- 	mem.frame = prev
+	-- 	mem.unsaved = bnot(mem.ftab[prev].save)
+	-- end
+	if state < FRAME_ALIVE then
+		-- use a tail call here rather than a loop because this has a very low and static iteration
+		-- count so we don't want the jit compiler to compile a looping trace
+		return detach(prev)
+	end
+end
+
+-- TODO (?): delete+load: can continue from chunk, but need to store cursor in frame
+local function mem_delete(fp)
+	local state = mem.ftab[fp].state
+	if state <= FRAME_ALIVEMASK then
+		mem.ftab[fp].state = band(state, FRAME_OBJS)
+		return detach(fp)
+	else
+		mem.ftab[fp].state = band(state, FRAME_NOTALIVE)
+	end
+end
+
+local function work_init(size)
+	local bsize = CONFIG_MEM_BLOCKSIZE_MIN
+	local wnum = math.min(CONFIG_MEM_BLOCKNUM_MAX, math.ceil(size/bsize))
+	while wnum*bsize < size do bsize = 2*bsize end
+	-- use luajit allocator for the heap so that const heap references become
+	-- relative addresses in machine code.
+	local block_ct = ffi.typeof(string.format([[
+		__attribute__((aligned(%d)))
+		struct { uint8_t _[%d]; }
+	]], TARGET_CACHELINE_SIZE, bsize))
+	local work = ffi.new(ffi.typeof("$[?]", block_ct), wnum)
+	mem.work = shutdown(work, "anchor")
+	mem.bsize = bsize
+	mem.wnum = wnum
+	C.m3_mem_init(mem)
+	return mem.work, mem.bsize
+end
+
+local function iswritable(ptr)
+	return cast(uintptr_t, ptr) - cast(uintptr_t, mem.chunk) < mem.chunktop
+end
+
+local function mem_alloc(size, align)
+	if size > mem.cursor then
+		check(C.m3_mem_chunk_new(mem, size))
+	end
+	local cursor = band(mem.cursor-size, -align)
+	mem.cursor = cursor
+	local ptr = cast(voidptr, cast(uintptr_t, mem.chunk) + mem.cursor)
+	event("alloc", size, align, ptr)
+	return ptr
+end
+
+local function mem_realloc(oldptr, oldsize, newsize, align)
+	local newptr = mem_alloc(newsize, align)
+	if oldsize > 0 then
+		copy(newptr, oldptr, oldsize)
+	end
+	return newptr
+end
+
+local function mem_lref()
+	local lfreen = mem.lfreen - SIZEOF_OBJID
+	if lfreen >= 0 then
+		mem.lfreen = lfreen
+		return cast(objidptr, mem.lfree.data+lfreen)[0]
+	else
+		return (C.m3_mem_newobjref(mem))
+	end
+end
+
+local function mem_objref(obj, fin)
+	local idx = mem_lref()
+	local oldfin = lfin[idx]
+	if oldfin then
+		oldfin(lref[idx])
+	end
+	lref[idx] = obj
+	lfin[idx] = fin
+	return idx
+end
+
+local function mem_getobj(idx)
+	return lref[idx]
+end
 
 return {
-	arena        = global_savestate.arena,
-	scratch      = global_scratch,
-	setheap      = setheap,
-	iswritable   = iswritable,
-	dirty        = dirty,
-	setmask      = setmask,
-	save         = mem_save,
-	load         = mem_load,
+	state      = mem,
+	save       = mem_save,
+	write      = mem_write,
+	load       = mem_load,
+	delete     = mem_delete,
+	iswritable = iswritable,
+	alloc      = mem_alloc,
+	realloc    = mem_realloc,
+	objref     = mem_objref,
+	getobj     = mem_getobj,
+	work_init  = work_init,
 }

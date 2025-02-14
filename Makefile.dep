@@ -1,4 +1,6 @@
-libm3.o: libm3.c def.h target.h mem.c mp.c sql.h
+array.o: array.c def.h target.h err.h errmsg.h mem.h
+libm3.o: libm3.c def.h target.h array.c err.h errmsg.h mem.h mem.c \
+ config.h mp.c sql.h
 m3.o: m3.c target.h
-mem.o: mem.c def.h target.h
-mp.o: mp.c target.h def.h
+mem.o: mem.c config.h target.h def.h err.h errmsg.h mem.h
+mp.o: mp.c target.h config.h def.h

@@ -1,6 +1,5 @@
 local array = require "m3_array"
 local cdata = require "m3_cdata"
-local cdef = require "m3_cdef"
 local code = require "m3_code"
 local dbg = require "m3_debug"
 local environment = require "m3_environment"
@@ -14,6 +13,7 @@ require "table.clear"
 
 local load = code.load
 local event, enabled = dbg.event, dbg.enabled
+local mem_getobj = mem.getobj
 
 local G = fhk.newgraph()
 
@@ -205,7 +205,6 @@ local buf_mt = newmeta "buf"
 local function databuf()
 	return setmetatable({
 		tail = memslot { ctype="int32_t", init=0 },
-		state = { [0]=0 }
 	}, buf_mt)
 end
 
@@ -447,20 +446,16 @@ local function dataflow_visitexpr(o, dcx)
 end
 
 local function dataflow_lookup()
-	for _,node in ipairs(D.mapping_tables) do
-		if node.m3_vars then
-			table.clear(node.m3_vars)
+	D.mapping_tables = {}
+	for node in pairs(D.mapping) do
+		if node.op == "TAB" then
+			node.m3_vars = {}
+			table.insert(D.mapping_tables, node)
 		end
 	end
-	table.clear(D.mapping_tables)
 	for node in pairs(D.mapping) do
 		if node.op == "VAR" then
-			if not node.tab.m3_vars then
-				node.tab.m3_vars = {}
-			end
 			table.insert(node.tab.m3_vars, node)
-		elseif node.op == "TAB" then
-			table.insert(D.mapping_tables, node)
 		end
 	end
 end
@@ -514,14 +509,7 @@ local function slot_cmp(a, b)
 	return ffi.alignof(a.ctype) > ffi.alignof(b.ctype)
 end
 
-local function blockct(size, align)
-	return ffi.typeof(string.format([[
-		__attribute__((aligned(%d)))
-		struct { uint8_t data[%d]; }
-	]], align, size))
-end
-
-local function heaplayout(slots)
+local function worklayout(slots)
 	table.sort(slots, slot_cmp)
 	local ptr = 0
 	for _,slot in ipairs(slots) do
@@ -530,19 +518,12 @@ local function heaplayout(slots)
 		slot.ofs = ptr
 		ptr = ptr + ffi.sizeof(slot.ctype)
 	end
-	local blocksize = cdef.M3_MEM_BSIZEMIN
-	local numblock = math.min(cdef.M3_MEM_HEAPBMAX, math.ceil(ptr/blocksize))
-	while numblock*blocksize < ptr do blocksize = blocksize*2 end
-	local block_ct = blockct(blocksize, cdef.M3_MEM_BSIZEMIN)
-	-- use luajit allocator for the heap so that const heap references become
-	-- relative addresses in machine code.
-	local heap = ffi.new(ffi.typeof("$[?]", block_ct), numblock)
-	mem.setheap(heap, blocksize, numblock)
-	D.heap_block = blocksize
+	local work, bsize = mem.work_init(ptr)
+	D.bsize = bsize
 	for _, slot in ipairs(slots) do
 		slot.ptr = ffi.cast(
 			ffi.typeof("$*", slot.ctype),
-			ffi.cast("intptr_t", heap) + slot.ofs
+			ffi.cast("intptr_t", work) + slot.ofs
 		)
 	end
 end
@@ -560,12 +541,8 @@ local function dummylayout(slots)
 	if size == 0 then
 		return
 	end
-	local region
-	if align <= 16 then
-		region = malloc(size)
-	else
-		region = ffi.new(blockct(size, align))
-	end
+	assert(align <= 16, "TODO")
+	local region = malloc(size)
 	shutdown(region, "anchor")
 	for _, slot in ipairs(slots) do
 		slot.ptr = ffi.cast(ffi.typeof("$*", slot.ctype), region)
@@ -641,7 +618,7 @@ local function memlayout()
 			table.insert(t, o)
 		end
 	end
-	heaplayout(rw)
+	worklayout(rw)
 	dummylayout(ro)
 	dummylayout(wo)
 	for o in pairs(all) do
@@ -753,6 +730,7 @@ local function makemappings()
 			buf:put(map(obj, tostring(node.tab.name), name), "\n")
 		end
 	end
+	event("gmap", buf)
 	G:define(buf)
 end
 
@@ -782,6 +760,9 @@ local function visit_reset(o, tx, mapping_inverse)
 			tx.reset = G:newreset()
 		end
 		for _,node in ipairs(mapping_inverse[o]) do
+			if node.m3_default then
+				node = string.format("%s.data'{%s}", node.tab.name, node.name)
+			end
 			tx.reset:add(node)
 		end
 	end
@@ -811,47 +792,58 @@ local function makeresets()
 	end
 end
 
-local function compilegraph()
+local function compilegraph(alloc)
 	makequeries()
 	makeresets()
 	makemappings()
 	G = assert(G:compile())
 	-- pre-create instance so that instance creation can assume we always have a non-null instance
 	-- available
-	D.G_state.ptr.instance = G:newinstance(ffi.C.m3__mem_extalloc, mem.arena)
+	D.G_state.ptr.instance = G:newinstance(alloc, mem.state)
 	D.G_state.ptr.mask = 0
 end
 
 ---- Action buffers ------------------------------------------------------------
 
-local function abuf_action(f, n)
+local function abuf_trampoline(f, n)
 	local buf = buffer.new()
-	buf:put("local f = ...\nreturn function(state, idx)\nf(")
-	if n > 0 then
-		buf:put("state[idx]")
-		for i=2, n do buf:putf(", state[idx+%d]", i-1) end
+	buf:put("local f = ...\nreturn function(o,b,i)\nf(")
+	for i=1, n do
+		if i>1 then buf:put(",") end
+		buf:putf("o._%d", i)
 	end
-	buf:putf(") return state[idx+%d](state, idx+%d)\nend\n", n, n+1)
-	return load(buf)(f)
+	buf:put(") if i>=0 then return b[i]:call(b,i-1) end end\n")
+	return load(buf, code.chunkname(string.format("action %s", dbg.describe(f))))(f)
 end
+
+local function abuf_commit_(tail)
+	local buf = {}
+	local n = 0
+	while true do
+		local o = mem_getobj(tail)
+		-- prev=nil -> already flushed
+		if (not o) or (not o.prev) then break end
+		buf[n] = o
+		n = n+1
+		tail = o.prev
+		o.prev = nil
+	end
+	if n > 0 then
+		return buf[n-1]:call(buf, n-2)
+	end
+end
+
+local abuf_commit = load([[
+	local abuf_commit_ = ...
+	local tail
+	return function()
+		return abuf_commit_(tail[0])
+	end
+]])(abuf_commit_)
 
 local function stmt_buffer(stmt, ...)
 	return stmt:buffer(...)
 end
-
-local abuf_commit = load([[
-	local state = ...
-	local tail
-	local function abuf_stop() end
-	return function()
-		local h, t = state[0], tail[0]
-		if t > h then
-			state[0] = t
-			state[t+1] = abuf_stop
-			state[1](state, 2)
-		end
-	end
-]])(D.actions.state)
 
 ---- Transaction compilation ---------------------------------------------------
 
@@ -918,7 +910,7 @@ function emit_read.splat(ctx, splat)
 end
 
 function emit_read.literal(ctx, literal)
-	return ctx.uv[literal]
+	return ctx.uv[literal.value]
 end
 
 function emit_read.func(ctx, call)
@@ -1014,23 +1006,25 @@ function emit_write.splat(ctx, splat, value)
 	end
 end
 
-local function emitbufcall(ctx, n, trampoline, value)
-	ctx.uv.max = math.max
-	local tail = ctx.uv[D.actions.tail.ptr]
-	local state = ctx.uv[D.actions.state]
-	ctx.buf:putf(
-		"do local idx = max(%s[0], %s[0]) %s[0]=idx+%d idx=idx-%s[0] %s[idx+1]",
-		state, tail, tail, n+1, state, state
-	)
-	for i=1, n do ctx.buf:putf(", %s[idx+%d]", state, i+1) end
-	ctx.buf:putf(" = %s", ctx.uv[trampoline])
-	if n > 0 then ctx.buf:putf(", %s", tovalue(value)) end
-	ctx.buf:put(" end\n")
+-- TODO: reuse trampoline for f/n pairs
+local function emitbufcall(ctx, buf, f, n, value)
+	ctx.uv.objref = mem.objref
+	local tail = ctx.uv[buf.tail.ptr]
+	local name = ctx:name()
+	ctx.buf:putf("do local %s = {prev=%s[0], call=%s}\n", name, tail, ctx.uv[abuf_trampoline(f, n)])
+	if n>0 then
+		for i=1, n do
+			if i>1 then ctx.buf:put(",") end
+			ctx.buf:putf("%s._%d", name, i)
+		end
+		ctx.buf:putf(" = %s\n", tovalue(value))
+	end
+	ctx.buf:putf("%s[0] = objref(%s) end\n", tail, name)
 end
 
 function emit_write.func(ctx, call, value)
 	if call.buf then
-		emitbufcall(ctx, call.n, abuf_action(call.func, call.n), value)
+		emitbufcall(ctx, call.buf, call.func, call.n, value)
 	else
 		ctx.buf:putf("%s(%s)\n", ctx.uv[call.func], value)
 	end
@@ -1041,7 +1035,7 @@ end
 function emit_write.dml(ctx, dml, value)
 	local args = ctx.uv[sqlite.statement(dml.sql)]
 	if dml.n > 0 then args = string.format("%s, %s", args, tovalue(value)) end
-	emitbufcall(ctx, 1+dml.n, abuf_action(stmt_buffer, 1+dml.n), args)
+	emitbufcall(ctx, D.actions, stmt_buffer, 1+dml.n, args)
 end
 
 function emit_write.autoselect(ctx, asel, value)
@@ -1098,32 +1092,34 @@ function emit_write.autoselect(ctx, asel, value)
 			end
 		end
 		if #cols == 0 and #dummies == 0 then return end
+		local ptr = ctx.uv[asel.obj.slot.ptr]
+		local sqlcount = {sqlite.sql("SELECT", "COUNT(*)"), sqlite.sql("FROM", tname), asel.sql}
+		ctx.buf:putf(
+			"do\nlocal s=%s.sqlite3_stmt s:bindargs(%s) s:step() local num=s:int(0) local base=%s:alloc(num) s:reset()\n",
+			ctx.uv[sqlite.statement(sqlcount)], value, ptr
+		)
 		if #names == 0 then
-			-- ensure we select at least one value.
-			-- note that it would be faster to `SELECT COUNT(*)` here, but this case will almost
-			-- never happen in practice so it's not worth optimizing for.
+			-- hack to ensure the SELECT statement compiles.
+			-- a proper implementation would just omit in the following loop.
 			names[1] = "0"
 		end
-		local ptr = ctx.uv[asel.obj.slot.ptr]
 		local sql = {sqlite.sql("SELECT", unpack(names)), sqlite.sql("FROM", tname), asel.sql}
 		ctx.buf:putf(
-			"for row in %s:rows(%s) do\nlocal idx = %s:alloc()\n",
-			ctx.uv[sqlite.statement(sql)],
-			value,
-			ptr
+			"local r=%s.sqlite3_stmt r:bindargs(%s) for i=0, num-1 do r:step()\n",
+			ctx.uv[sqlite.statement(sql)], value
 		)
 		for i,c in ipairs(cols) do
-			ctx.buf:putf("%s.%s[idx] = ", ptr, c.name)
+			ctx.buf:putf("%s.%s[base+i] = ", ptr, c.name)
 			if nulls[c] then
-				ctx.buf:putf("row:col(%d) or %s\n", i-1, ctx.uv[c.dummy])
+				ctx.buf:putf("r:col(%d) or %s\n", i-1, ctx.uv[c.dummy])
 			else
-				ctx.buf:putf("row:%s(%d)\n", cdata.isfp(c.ctype) and "double" or "int", i-1)
+				ctx.buf:putf("r:%s(%d)\n", cdata.isfp(c.ctype) and "double" or "int", i-1)
 			end
 		end
 		for _,c in ipairs(dummies) do
-			ctx.buf:putf("%s.%s[idx] = %s\n", ptr, c.name, ctx.uv[c.dummy])
+			ctx.buf:putf("%s.%s[base+i] = %s\n", ptr, c.name, ctx.uv[c.dummy])
 		end
-		ctx.buf:put("end\n")
+		ctx.buf:put("end\nr:reset() end\n")
 	else
 		error(string.format("cannot autoselect into %s", tag))
 	end
@@ -1176,8 +1172,8 @@ local function cdatamask(ofs, size)
 	if type(ofs) == "table" then
 		ofs, size = ofs.ofs, ffi.sizeof(ofs.ctype)
 	end
-	local first = math.floor(ofs / D.heap_block)
-	local last = math.floor((ofs+size-1) / D.heap_block)
+	local first = math.floor(ofs / D.bsize)
+	local last = math.floor((ofs+size-1) / D.bsize)
 	return bit.lshift(1ull, last+1) - bit.lshift(1ull, first)
 end
 
@@ -1215,8 +1211,8 @@ local function compiletransaction(tx, graph_instance)
 		visit_mmask(D.G_state, ctx)
 	end
 	if ctx.mmask then
-		ctx.uv.mem_setmask = mem.setmask
-		ctx.buf:putf("mem_setmask(0x%xull)\n", ctx.mmask)
+		ctx.uv.mem_write = mem.write
+		ctx.buf:putf("mem_write(0x%xull)\n", ctx.mmask)
 	end
 	if tx.reset then
 		ctx.uv.G_state = D.G_state.ptr
@@ -1253,29 +1249,29 @@ local function compiletransaction(tx, graph_instance)
 		buf:put("\n")
 	end
 	buf:put("end\n")
-	return load(buf)(unpack(uv))
+	return load(buf, code.chunkname(string.format("transaction %p", tx)))(unpack(uv))
 end
 
 -- TODO: this should take a query mask parameter and only create a new instance if the intersection
 -- is nonzero
-local function graph_instancefunc()
+local function graph_instancefunc(alloc)
 	return load(string.format([[
-		local state, G, C, arena, setmask, iswritable = ...
+		local state, G, alloc, memstate, write, iswritable = ...
 		return function()
 			if not iswritable(state.instance) then
-				setmask(0x%xull)
+				write(0x%xull)
 				goto new
 			end
 			if state.mask == 0 then
 				return state.instance
 			end
 			::new::
-			local instance = G:newinstance(C.m3__mem_extalloc, arena, state.instance, state.mask)
+			local instance = G:newinstance(alloc, memstate, state.instance, state.mask)
 			state.instance = instance
 			state.mask = 0
 			return instance
 		end
-	]], cdatamask(D.G_state)))(D.G_state.ptr, G, ffi.C, mem.arena, mem.setmask,
+	]], cdatamask(D.G_state)))(D.G_state.ptr, G, alloc, mem.state, mem.write,
 		mem.iswritable)
 end
 
@@ -1284,8 +1280,8 @@ local tx_compiled_mt = {
 	__call = function(self, ...) return self.func(...) end
 }
 
-local function compiletransactions()
-	local graph_instance = graph_instancefunc()
+local function compiletransactions(alloc)
+	local graph_instance = graph_instancefunc(alloc)
 	for _,tx in ipairs(D.transactions) do
 		local func = compiletransaction(tx, graph_instance)
 		table.clear(tx)
@@ -1340,14 +1336,22 @@ local function traceobjs()
 	return objs
 end
 
+local function trace_alloc(_, size, align)
+	local ptr = ffi.C.m3_mem_alloc(mem.state, size, align)
+	event("alloc", tonumber(size), tonumber(align), ptr)
+	return ptr
+end
+
 local function init()
 	dataflow()
 	memlayout()
-	compilegraph()
+	local alloc = enabled("alloc") and ffi.cast("void *(*)(void *, size_t, size_t)", trace_alloc)
+		or ffi.C.m3_mem_alloc
+	compilegraph(alloc)
 	if enabled("data") then
 		event("data", traceobjs())
 	end
-	compiletransactions()
+	compiletransactions(alloc)
 	code.setupvalue(abuf_commit, "tail", D.actions.tail.ptr)
 	table.clear(D)
 end
@@ -1485,17 +1489,8 @@ local function transaction_insert(transaction, a, b)
 	end
 end
 
--- TODO: just build copylist directly here (put df_clearmask in m3_array.lua)
--- TODO: remove the mask:get(...) and make the fhk tensor type indexable with []
--- (use an __index function to dispatch indexing/methods, luajit will optimize the check away)
 local function df_clearmask(ptr, mask)
-	local idx = {}
-	for i=0, #mask-1 do
-		if mask:get(i) then
-			table.insert(idx, i)
-		end
-	end
-	return ptr:clear(idx)
+	return ptr:clearmask(mask)
 end
 
 -- transaction_delete(func: tab -> expr)

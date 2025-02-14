@@ -172,14 +172,38 @@ case(
 )
 
 case(
+	"calcc",
+	all {
+		node(1),
+		callcc(function(continue)
+			local sp = save()
+			putnode(2)
+			local r = continue()
+			if r ~= nil then goto out end
+			sload(sp)
+			putnode(3)
+			r = continue()
+			::out::
+			delete(sp)
+			return r
+		end),
+		node(4)
+	},
+	tree { {1, {2, 4}, {3, 4}} }
+)
+
+local function nop() end
+local nopbarrier = all { nop, nop }
+
+case(
 	"callstack-overwrite",
 	function()
 		local branch = all {
 			any {
-				all {},
-				all {}
+				nopbarrier,
+				nopbarrier,
 			},
-			all {}
+			nopbarrier,
 		}
 		return all {
 			branch,
@@ -195,10 +219,10 @@ case(
 	function()
 		local branch = all {
 			any {
-				all {},
-				all {}
+				nopbarrier,
+				nopbarrier,
 			},
-			all {}
+			nopbarrier,
 		}
 		return all {
 			all {
@@ -212,15 +236,15 @@ case(
 								branch,
 								node(1)
 							},
-							all {}
+							nopbarrier,
 						},
-						all {}
+						nopbarrier,
 					},
-					all {}
+					nopbarrier,
 				},
-				all {}
+				nopbarrier,
 			},
-			all {}
+			nopbarrier,
 		}
 	end,
 	tree { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
@@ -240,7 +264,7 @@ if test "control:recursion" then
 			n = n+1
 		end
 	}
-	table.insert(insn.edges, insn)
+	table.insert(insn, insn)
 	simulate {
 		function()
 			m3.exec(insn)

@@ -1,83 +1,17 @@
 local cdata = require "m3_cdata"
+local code = require "m3_code"
 local mem = require "m3_mem"
 local fhk = require "fhk"
 local ffi = require "ffi"
 local buffer = require "string.buffer"
 require "table.new"
-
-local iswritable, scratch, arena = mem.iswritable, mem.scratch, mem.arena
+local load = code.load
+local check = cdata.check
+local mem_alloc, mem_realloc, mem_state, iswritable = mem.alloc, mem.realloc, mem.state, mem.iswritable
 local tonumber, type = tonumber, type
 local C, alignof, cast, ffi_copy, ffi_fill, sizeof, typeof = ffi.C, ffi.alignof, ffi.cast, ffi.copy, ffi.fill, ffi.sizeof, ffi.typeof
 local band, bor, lshift, rshift = bit.band, bit.bor, bit.lshift, bit.rshift
 local max, min = math.max, math.min
-
----- slices --------------------------------------------------------------------
-
-local function slice_index(slice, index)
-	return slice.data[index]
-end
-
-local function slice_newindex(slice, index, value)
-	slice.data[index] = value
-end
-
-local function slice_len(slice)
-	return slice.num
-end
-
-local function slice_inext(slice, index)
-	index = index+1
-	if index < slice.num then
-		return index, slice.data[index]
-	end
-end
-
-local function slice_ipairs(slice)
-	return slice_inext, slice, -1
-end
-
-local function slice_tostring(slice)
-	local buf = buffer.new()
-	buf:put("[")
-	-- TODO: use cdata pretty print here
-	for i=0, slice.num-1 do
-		buf:put(" ", tostring(slice.data[i]))
-	end
-	buf:put(" ]")
-	return tostring(buf)
-end
-
-local slice_mt = {
-	__index    = slice_index,
-	__newindex = slice_newindex,
-	__len      = slice_len,
-	__ipairs   = slice_ipairs,
-	__tostring = slice_tostring
-}
-
-local function slice_newct(ctype)
-	return ffi.metatype(typeof([[
-		struct {
-			$ *data;
-			uint32_t num;
-		}
-	]], ctype), slice_mt)
-end
-
-local slicetab = {}
-
-local function slice_of(ctype)
-	ctype = typeof(ctype)
-	local ctid = tonumber(ctype)
-	local ct = slicetab[ctid]
-	if not ct then
-		ct = slice_newct(ctype)
-		slicetab[ctid] = ct
-	end
-	return ct
-end
-
----- vector copies -------------------------------------------------------------
 
 local direct_cache = {} -- ctypeid -> function
 
@@ -149,198 +83,49 @@ local function copyext(dst, dstnum, src, srcnum, dummy)
 	if srcnum > 0 then
 		copy(dst, src, min(dstnum, srcnum))
 	end
-	if srcnum < dstnum and dummy then
+	if srcnum < dstnum then
+		if not dummy then
+			error("too few elements and no filler value")
+		end
 		fill(dst, srcnum, dummy, dstnum-srcnum)
 	end
 end
 
----- vectors -------------------------------------------------------------------
-
-local function vec_append(vec, x)
-	local idx = vec.num
-	vec.num = idx+1
-	if idx >= vec.cap then
-		local cap = max(2*vec.cap, 8)
-		vec.cap = cap
-		local size = vec["m3$size"]
-		vec.data = arena:xrealloc(vec.data, size*idx, size*cap, vec["m3$align"])
-	end
-	vec.data[idx] = x
-end
-
-local function vec_alloc(vec, n)
-	local idx, cap = vec.num, vec.cap
-	local num = idx + (n or 1)
-	vec.num = num
-	if num > cap then
-		cap = max(cap, 4)
-		repeat cap = cap*2 until cap >= num
-		vec.cap = cap
-		local size = vec["m3$size"]
-		vec.data = arena:xrealloc(vec.data, size*idx, size*cap, vec["m3$align"])
-	end
-	return idx
-end
-
-local function vec_mutate(vec, realloc)
-	if realloc or not iswritable(vec.data) then
-		local size = vec["m3$size"]
-		vec.data = arena:xrealloc(vec.data, size*vec.num, size*vec.cap, vec["m3$align"])
-	end
-end
-
-local function vec_write(vec, realloc)
-	if realloc or not iswritable(vec.data) then
-		local size = vec["m3$size"]
-		vec.data = arena:xbump(size*vec.cap, vec["m3align"])
-	end
-end
-
-local function vec_extend(vec, xs)
-	local n = #xs
-	local idx = vec_alloc(vec, n)
-	copy(vec.data+idx, xs, n)
-end
-
-local function copylistset(idx)
-	local ptr = cast("uint64_t *", scratch.cursor)
-	ptr[0] = bor(ptr[0], lshift(1ull, band(idx, 0x3f)))
-end
-
-local function buildcopylist(idx, num)
-	local size = 8*(rshift(num+63, 6))
-	scratch:bump(size, 8)
-	ffi_fill(cast("uint64_t *", scratch.cursor), size)
-	if type(idx) == "table" then
-		if #idx == 0 then return 0 end
-		for i=1, #idx do
-			copylistset(idx[i])
-		end
-	elseif type(idx) == "number" then
-		copylistset(idx)
-	else
-		error("idx should be a table or number")
-	end
-	local top = scratch.cursor
-	local nnum = C.m3__mem_buildcopylist(scratch, num)
-	if nnum < 0 then scratch:oom() end
-	-- NOTE: shift here adjusts it to CopySpan-sized units, see mem.c
-	return nnum, rshift(top - scratch.cursor, 3)
-end
-
--- temporary scratch space to prevent some allocations
-local tmp = ffi.new [[
-	struct {
-		int64_t i64;
-	}
-]]
-
-local function vec_clear(vec, idx)
-	if idx == nil then
-		vec.num = 0
-		if not iswritable(vec.data) then
-			vec.cap = 0
+local function df_mutate(df, col, realloc)
+	if col then
+		if realloc or not iswritable(df[col]) then
+			local size = df["m3$size"][col]
+			local align = df["m3$align"][col]
+			df[col] = mem_realloc(df[col], size*df.num, size*df.cap, align)
 		end
 	else
-		local size, align = vec["m3$size"], vec["m3$align"]
-		tmp.i64 = scratch.cursor
-		local num, nc = buildcopylist(idx, vec.num)
-		vec.num = num
-		if nc > 0 then
-			if C.m3__mem_copy_list1(arena, scratch.cursor, nc, size, align, vec) < 0 then
-				arena:oom()
-			end
+		if df.num > 0 then
+			check(C.m3_array_mutate(mem_state, df["m3$cproto"], df))
+		else
+			df.cap = 0
 		end
-		scratch.cursor = tmp.i64
 	end
+	return df
 end
 
-local function cdata2tab(data, num)
-	local tab = table.new(num, 0)
-	for i=0, num-1 do
-		tab[i+1] = data[i]
+local function df_write(df, col, realloc)
+	if realloc or not iswritable(df[col]) then
+		local size = df["m3$size"][col]
+		local align = df["m3$align"][col]
+		df[col] = mem_alloc(size*df.cap, align)
 	end
-	return tab
+	return df
 end
 
-local function vec_table(vec)
-	return cdata2tab(vec.data, vec.num)
-end
-
-local function vec_newct(ctype)
-	-- layout must match a dataframe with a single column
-	return ffi.metatype(typeof([[
-		struct {
-			uint32_t num;
-			uint32_t cap;
-			$ *data;
-		}
-	]], ctype), {
-		__index = {
-			["m3$size"]  = sizeof(ctype),
-			["m3$align"] = alignof(ctype),
-			append       = vec_append,
-			alloc        = vec_alloc,
-			mutate       = vec_mutate,
-			write        = vec_write,
-			extend       = vec_extend,
-			clear        = vec_clear,
-			table        = vec_table
-		},
-		__len            = slice_len,
-		__ipairs         = slice_ipairs,
-		__tostring       = slice_tostring
-	})
-end
-
-local vectab = {}
-
-local function vec_of(ctype)
-	ctype = ffi.typeof(ctype)
-	local ctid = tonumber(ctype)
-	if not vectab[ctid] then
-		vectab[ctid] = vec_newct(ctype)
-	end
-	return vectab[ctid]
-end
-
----- data frames ---------------------------------------------------------------
-
-local function df_allocfunc(cols)
-	if #cols == 0 then return function() end end
-	local buf = buffer.new()
-	buf:put([[
-		local max = math.max
-		local arena = ...
-		return function(df, n)
-			local idx, cap = df.num, df.cap
-			local num = idx + (n or 1)
-			df.num = num
-			if num > cap then
-				cap = max(cap, 4)
-				repeat cap = cap*2 until cap >= num
-				df.cap = cap
-	]])
-	for _,col in ipairs(cols) do
-		buf:putf(
-			"df.%s = arena:xrealloc(df.%s, %d*idx, %d*cap, %d)\n",
-			col.name, col.name, sizeof(col.ctype), sizeof(col.ctype), alignof(col.ctype)
-		)
-	end
-	buf:put([[
-			end
-			return idx
-		end
-	]])
-	return assert(load(buf))(arena)
-end
-
-local function embedconst(k)
-	if k == k then
-		return tostring(k)
+local function df_alloc(df, n)
+	local num = df.num
+	if num+n > df.cap then
+		check(C.m3_array_grow(mem_state, df["m3$cproto"], df, n))
 	else
-		return "0/0"
+		df.num = num+n
+		df_mutate(df)
 	end
+	return num
 end
 
 local function df_copyrowfunc(cols)
@@ -360,10 +145,10 @@ local function df_copyrowfunc(cols)
 					df.%s[idx] = v
 				end
 			end
-		]], col.name, col.name, embedconst(col.dummy or 0), col.name)
+		]], col.name, col.name, code.embedconst(col.dummy or 0), col.name)
 	end
 	buf:put("end")
-	return assert(load(buf))()
+	return load(buf)()
 end
 
 local function df_addrow(df, row)
@@ -383,43 +168,72 @@ local function df_addrowsfunc()
 	]])()
 end
 
+local uint64_p = typeof("uint64_t *")
+
 local function df_clear(df, idx)
 	if idx == nil then
 		df.num = 0
 		df.cap = 0
 	elseif #idx > 0 then
-		tmp.i64 = scratch.cursor
-		local proto = df["m3$cproto"]
-		local num, nc = buildcopylist(idx, df.num)
-		df.num = num
-		if nc > 0 then
-			if C.m3__mem_copy_list(arena, scratch.cursor, nc, proto, df) < 0 then
-				arena:oom()
-			end
+		local size = 8*(1+rshift(df.num,6))
+		-- scratch pointer is aligned here because len=0
+		local deletemap = cast(uint64_p, C.m3_mem_vec_alloc(mem_state.scratch, size))
+		ffi_fill(deletemap, size)
+		for i=1, #idx do
+			local j = idx[i]
+			local k = rshift(j, 6)
+			deletemap[k] = bor(deletemap[k], lshift(1ull, band(j, 0x3f)))
 		end
-		scratch.cursor = tmp.i64
+		-- this also resets the scratch buffer
+		check(C.m3_array_delete_bitmap(mem_state, df["m3$cproto"], df))
+	elseif type(idx) == "number" then
+		-- TODO: do retain_sparse with two spans
+		error("TODO")
 	end
 end
 
-local function df_mutate(df, col, realloc)
-	if realloc or not iswritable(df[col]) then
-		local size = df["m3$size"][col]
-		local align = df["m3$align"][col]
-		df[col] = arena:xrealloc(df[col], size*df.num, size*df.cap, align)
-	end
-end
+local sizeof_span = sizeof("m3_Span")
+local span_p = typeof("m3_Span *")
 
-local function df_write(df, col, realloc)
-	if realloc or not iswritable(df[col]) then
-		local size = df["m3$size"][col]
-		local align = df["m3$align"][col]
-		df[col] = arena:xbump(size*df.cap, align)
+-- TODO: make fhk arrays normally indexable and replace mask:get(...) -> mask[...]
+-- (use an __index function to dispatch indexing/methods, luajit will optimize the check away)
+local function df_clearmask(df, mask)
+	local n = df.num
+	if n == 0 then return end
+	local i = 0
+	local remain = 0
+	if mask:get(0) then goto ones end
+	::zeros::
+	do
+		local i0 = i
+		while i < n do
+			if mask:get(i) then
+				break
+			end
+			i = i+1
+			remain = remain+1
+		end
+		local span = cast(span_p, C.m3_mem_vec_alloc(mem_state.scratch, sizeof_span))
+		span.ofs = i0
+		span.num = i-i0
 	end
+	if i == n then goto clear end
+	::ones::
+	i = i+1
+	while i < n do
+		if not mask:get(i) then
+			goto zeros
+		end
+		i = i+1
+	end
+	::clear::
+	check(C.m3_array_retain_spans(mem_state, df["m3$cproto"], df, remain))
 end
 
 local function df_overwrite(df, col, src)
 	df_write(df, col)
 	copy(df[col], src)
+	return df
 end
 
 local function df_addcolsfunc(cols)
@@ -429,25 +243,29 @@ local function df_addcolsfunc(cols)
 		local max = math.max
 		local copyext = ...
 		return function(df, cols, num)
-			num = num or max(
 	]])
 	for i,c in ipairs(cols) do
-		if i>1 then buf:put(",") end
-		buf:putf("cols.%s and #cols.%s or 0", c.name, c.name)
+		buf:putf("local num%d = cols.%s and #cols.%s or ", i, c.name, c.name)
+		if c.dummy then
+			buf:put("0\n")
+		else
+			buf:putf([[error("column without dummy must be given a value: `%s'") ]], c.name)
+		end
 	end
-	buf:put(")\n")
-	buf:put([[
-		if num == 0 then return end
-		local base = df:alloc(num)
-	]])
-	for _,col in ipairs(cols) do
+	buf:putf("if not num then num = max(")
+	for i=1, #cols do
+		if i>1 then buf:put(",") end
+		buf:putf("num%d", i)
+	end
+	buf:put(") end if num == 0 then return end local base = df:alloc(num)\n")
+	for i,c in ipairs(cols) do
 		buf:putf(
-			"copyext(df.%s+base, num, cols.%s, cols.%s and #cols.%s or 0, %s)\n",
-			col.name, col.name, col.name, col.name, embedconst(col.dummy)
+			"copyext(df.%s+base, num, cols.%s, num%d, %s)\n",
+			c.name, c.name, i, code.embedconst(c.dummy)
 		)
 	end
 	buf:put("end")
-	return assert(load(buf))(copyext)
+	return load(buf)(copyext)
 end
 
 local function df_extend(df, tab, num)
@@ -527,10 +345,6 @@ local function df_tostring(df)
 	return tostring(buf)
 end
 
-local function df_pretty(df, ...)
-	de.putpp(df_table(df), ...)
-end
-
 local function df_cproto(proto)
 	local size = {}
 	for _,col in ipairs(proto) do
@@ -560,7 +374,6 @@ local function df_of(proto)
 	end
 	ctdef:put("}")
 	local df_addcols = df_addcolsfunc(proto)
-	local df_alloc = df_allocfunc(proto)
 	local df_copyrow = df_copyrowfunc(proto)
 	local df_addrows = df_addrowsfunc()
 	return ffi.metatype(typeof(tostring(ctdef), unpack(ctarg)), {
@@ -568,7 +381,6 @@ local function df_of(proto)
 			["m3$size"]   = size,
 			["m3$align"]  = align,
 			["m3$cproto"] = df_cproto(proto),
-			["m3$pretty"] = df_pretty,
 			addcols       = df_addcols,
 			alloc         = df_alloc,
 			copyrow       = df_copyrow,
@@ -577,6 +389,7 @@ local function df_of(proto)
 			extend        = df_extend,
 			settab        = df_settab,
 			clear         = df_clear,
+			clearmask     = df_clearmask,
 			mutate        = df_mutate,
 			write         = df_write,
 			overwrite     = df_overwrite,
@@ -587,11 +400,6 @@ local function df_of(proto)
 	})
 end
 
---------------------------------------------------------------------------------
-
 return {
-	slice_of = slice_of,
-	vec_of   = vec_of,
-	df_of    = df_of,
-	copy     = copy
+	df_of = df_of
 }

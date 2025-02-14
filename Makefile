@@ -23,12 +23,14 @@ TARGET_SYS     = $(HOST_SYS)
 CCOPT          = -O2
 CCWARN         = -Wall -Wextra
 CCDEBUG        =
+XCCDEBUG       = -DNDEBUG
 
-CCOPTIONS      = $(CCOPT) $(CCWARN) $(CFLAGS) $(XCFLAGS)
+CCOPTIONS      = $(CCOPT) $(CCWARN) $(CCDEBUG) $(CFLAGS) $(XCFLAGS) $(XCCDEBUG)
 LDOPTIONS      = -Wl,--gc-sections $(LDFLAGS)
 
 ifneq (,$(CCDEBUG))
 STRIP          = :
+XCCDEBUG       =
 endif
 
 # ---- Host & target detection -------------------------------------------------
@@ -64,7 +66,7 @@ M3GENLUA       = m3_cdef.lua
 
 ifeq (y,$(EMBEDLUA))
 M3LUA_O        = m3.lua.o m3_array.lua.o m3_cdata.lua.o m3_cdef.lua.o m3_code.lua.o \
-				 m3_constify.lua.o m3_control.lua.o m3_data.lua.o m3_debug.lua.o m3_loop.lua.o \
+				 m3_control.lua.o m3_data.lua.o m3_debug.lua.o m3_loop.lua.o \
 				 m3_mem.lua.o m3_mp.lua.o m3_mp_main.lua.o m3_mp_worker.lua.o m3_shutdown.lua.o \
 				 m3_sqlite.lua.o m3_uid.lua.o
 M3EXELUA_O     = m3_simulate.lua.o m3_test.lua.o

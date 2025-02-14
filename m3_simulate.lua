@@ -5,13 +5,15 @@ local global_data = {}
 local global_task
 
 local globals = {
-	"all", "any", "call", "dynamic", "exec", "first", "loop", "nothing", "optional", "skip", "try",
+	"all", "any", "call", "callcc", "dynamic", "exec", "first", "loop", "nothing", "optional", "skip", "try",
 	"arg", "cdata", "connect", "define", "defined", "func", "include", "pipe", "ret", "transaction",
-	"pprint",
+	"save", "delete",
+	"pprint", "pretty",
 	"database", "datadef",
 	"uid"
 }
 for _,func in ipairs(globals) do _G[func] = m3[func] end
+_G.sload = m3.load -- rename so we don't overwrite the builtin `load`
 
 if not test then
 	function test() return false end

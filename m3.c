@@ -42,20 +42,33 @@ static void help(const char *progname)
 {
 	fprintf(stderr, "Usage: %s [option|script]... [-- [scriptargs]...]\n", progname);
 	fputs(
-			"    -O[opt]            Control LuaJIT optimizations.\n"
-			"    -j cmd             Perform LuaJIT control command.\n"
+		"    -O[opt]            Control LuaJIT optimizations.\n"
+		"    -j cmd             Perform LuaJIT control command.\n"
 #if M3_LINUX
-			"    -p num             Set number of worker processes (default: number of CPUs).\n"
+		"    -p num             Set number of worker processes (default: number of CPUs).\n"
 #endif
-			"    -l module          Load module.\n"
-			"    -d file[=name]     Attach database.\n"
-			"    -v[flags]          Verbose output.\n"
-			"    -m[region] size    Set virtual memory mapping size.\n"
-			"    -t[tests]          Test the simulator.\n"
-			"    -V                 Show version.\n"
-			"    --                 Stop handling options. Remaining arguments are passed to scripts.\n",
-			stderr
+		"    -l module          Load module.\n"
+		"    -d file[=name]     Attach database.\n"
+		"    -v[flags]          Verbose output (use -vh to list options).\n"
+		"    -t[tests]          Test the simulator.\n"
+		"    -V                 Show version.\n"
+		"    --                 Stop handling options. Remaining arguments are passed to scripts.\n",
+		stderr
 	 );
+}
+
+static void verbosehelp(void)
+{
+	fputs(
+		"Verbose flags (you can set multiple):\n"
+		"    d      Show inferred data model.\n"
+		"    s      Show save and load events.\n"
+		"    q      Show SQL queries.\n"
+		"    c      Show generated Lua code.\n"
+		"    a      Show memory allocations.\n"
+		"    g      Show generated fhk mappings.\n",
+		stderr
+	);
 }
 
 static void version(void)
@@ -120,7 +133,13 @@ help:
 			case 'V':
 				version();
 				exit(0);
-			case 'O': case 'v': case 't':
+			case 'v':
+				if (strchr(argv[0], 'h')) {
+					verbosehelp();
+					exit(0);
+				}
+				// fallthrough
+			case 'O': case 't':
 				STRARG(f, argv[0]+2);
 				break;
 			case 'j': case 'p': case 'l': case 'd':
@@ -140,8 +159,6 @@ help:
 				}
 				break;
 			}
-			case 'm':
-				assert(!"TODO: -m parsing");
 			default:
 				fprintf(stderr, "unrecognized option: -%c\n", f);
 				help(progname);

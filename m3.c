@@ -347,7 +347,7 @@ static int setup(lua_State *L)
 				break;
 			}
 			case OPT_SCRIPTARG:
-				return 0;
+				break;
 			default:
 				lua_getfield(L, 2, "cmd");
 				lua_pushlstring(L, &ap->option, 1);

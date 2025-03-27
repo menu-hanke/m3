@@ -1,10 +1,8 @@
 -- vim: ft=lua
-local m3 = require "m3"
-
-local current = cdata { ctype = "int32_t", init = 1 }
+local current = data.cdata { ctype = "int32_t", init = 1 }
 local nodes = { {[0]="(root)"} }
 
-local putnode = transaction()
+local putnode = data.transaction()
 	:mutate(current, function(current)
 		current[0] = math.max(current[0], #nodes)+1
 	end)
@@ -12,9 +10,9 @@ local putnode = transaction()
 		local idx = #nodes+1
 		nodes[idx] = {[0]=value}
 		table.insert(nodes[current], idx)
-	end, current, arg(1))
+	end, current, data.arg(1))
 
-local function node(value) return call(putnode, value) end
+local function node(value) return control.call(putnode, value) end
 
 local function check(result)
 	local errors = {}
@@ -55,9 +53,10 @@ local function case(name, insn, result)
 		if type(insn) == "function" then
 			insn = insn()
 		end
-		simulate {
+		control.simulate = {
 			function()
-				m3.exec(all { insn, m3.commit })
+				-- TODO: rewrite this to not use commit directly
+				control.exec(control.all { insn, require("m3_data").commit })
 				check(result)
 			end
 		}
@@ -66,69 +65,69 @@ end
 
 case(
 	"all:empty",
-	all { all {}, node(1) },
+	control.all { control.all {}, node(1) },
 	tree { 1 }
 )
 
 case(
 	"all:single",
-	all { node(1) },
+	control.all { node(1) },
 	tree { 1 }
 )
 
 case(
 	"all:chain",
-	all { node(1), node(2) },
+	control.all { node(1), node(2) },
 	tree { {1, 2} }
 )
 
 case(
 	"any:single",
-	any { node(1) },
+	control.any { node(1) },
 	tree { 1 }
 )
 
 case(
 	"any:branch",
-	all { any { node(1), node(2), node(3) }, node(4) },
+	control.all { control.any { node(1), node(2), node(3) }, node(4) },
 	tree { {1, 4}, {2, 4}, {3, 4} }
 )
 
 case(
 	"any:empty-after",
-	all { any {}, node(1) },
+	control.all { control.any {}, node(1) },
 	tree {}
 )
 
 case(
 	"any:empty-before",
-	any { all { node(1), any {} } },
+	control.any { control.all { node(1), control.any {} } },
 	tree {}
 )
 
 case(
 	"any:skip",
-	any { node(1), all { node(2), any {} }, node(3) },
+	control.any { node(1), control.all { node(2), control.any {} }, node(3) },
 	tree { 1, 3 }
 )
 
 case(
 	"nothing",
-	all { node(1), nothing, node(2) },
+	control.all { node(1), control.nothing, node(2) },
 	tree { {1, 2} }
 )
 
 case(
 	"optional",
 	function()
-		local state = cdata { ctype="struct { uint32_t bit; uint32_t value; }" }
-		local toggle = transaction():mutate(state, function(s) s.value = s.value+2^s.bit end)
-		local nextbit = transaction():mutate(state, function(s) s.bit = s.bit+1 end)
-		local getstate = transaction():read(state)
-		return all {
-			optional(toggle), nextbit,
-			optional(toggle), nextbit,
-			optional(toggle), nextbit,
+		local state = data.cdata { ctype="struct { uint32_t bit; uint32_t value; }" }
+		local toggle = data.transaction():mutate(state, function(s) s.value = s.value+2^s.bit end)
+		local nextbit = data.transaction():mutate(state, function(s) s.bit = s.bit+1 end)
+		local getstate = data.transaction():read(state)
+		return control.all {
+			control.optional(toggle), nextbit,
+			control.optional(toggle), nextbit,
+			control.optional(toggle), nextbit,
 			function() putnode(getstate().value) end
 		}
 	end,
@@ -137,54 +136,54 @@ case(
 
 case(
 	"skip",
-	any { all { skip, node(1) }, node(2) },
+	control.any { control.all { control.skip, node(1) }, node(2) },
 	tree { 2 }
 )
 
 case(
 	"first:take-branch",
-	first(any { node(1), node(2) }),
+	control.first(control.any { node(1), node(2) }),
 	tree { 1 }
 )
 
 case(
 	"first:skip-branch",
-	first(any { all { skip, node(1) }, node(2) }),
+	control.first(control.any { control.all { control.skip, node(1) }, node(2) }),
 	tree { 2 }
 )
 
 case(
 	"first:nest",
-	first(any { skip, first(any { node(1), node(2) }), node(3) }),
+	control.first(control.any { control.skip, control.first(control.any { node(1), node(2) }), node(3) }),
 	tree { 1 }
 )
 
 case(
 	"try",
-	all { try(all { skip, node(1) }), try(node(2)) },
+	control.all { control.try(control.all { control.skip, node(1) }), control.try(node(2)) },
 	tree { 2 }
 )
 
 case(
 	"dynamic",
-	all { node(1), dynamic(function() return all { node(2) } end) },
+	control.all { node(1), control.dynamic(function() return control.all { node(2) } end) },
 	tree { {1, 2} }
 )
 
 case(
 	"calcc",
-	all {
+	control.all {
 		node(1),
-		callcc(function(continue)
-			local sp = save()
+		control.callcc(function(continue)
+			local sp = control.save()
 			putnode(2)
 			local r = continue()
 			if r ~= nil then goto out end
-			sload(sp)
+			control.load(sp)
 			putnode(3)
 			r = continue()
 			::out::
-			delete(sp)
+			control.delete(sp)
 			return r
 		end),
 		node(4)
@@ -193,19 +192,19 @@ case(
 )
 
 local function nop() end
-local nopbarrier = all { nop, nop }
+local nopbarrier = control.all { nop, nop }
 
 case(
 	"callstack-overwrite",
 	function()
-		local branch = all {
-			any {
+		local branch = control.all {
+			control.any {
 				nopbarrier,
 				nopbarrier,
 			},
 			nopbarrier,
 		}
-		return all {
+		return control.all {
 			branch,
 			branch,
 			node(1)
@@ -217,19 +216,19 @@ case(
 case(
 	"deep-callstack",
 	function()
-		local branch = all {
-			any {
+		local branch = control.all {
+			control.any {
 				nopbarrier,
 				nopbarrier,
 			},
 			nopbarrier,
 		}
-		return all {
-			all {
-				all {
-					all {
-						all {
-							all {
+		return control.all {
+			control.all {
+				control.all {
+					control.all {
+						control.all {
+							control.all {
 								branch,
 								branch,
 								branch,
@@ -252,22 +251,22 @@ case(
 
 case(
 	"return-false",
-	any { all { function() return false end, node(1) }, node(2) },
+	control.any { control.all { function() return false end, node(1) }, node(2) },
 	tree { 2 }
 )
 
 if test "control:recursion" then
 	local n = 0
-	local insn = all {
+	local insn = control.all {
 		function()
 			if n == 10 then return false end
 			n = n+1
 		end
 	}
 	table.insert(insn, insn)
-	simulate {
+	control.simulate = {
 		function()
-			m3.exec(insn)
+			control.exec(insn)
 			assert(n == 10)
 		end
 	}

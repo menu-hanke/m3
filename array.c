@@ -60,7 +60,7 @@ static int array_retain_spans(m3_Mem *mem, m3_DfProto *proto, DfData *data,
 }
 
 // spans must be allocated at the start of the scratch buffer
-CDEFFUNC int m3_array_retain_spans(m3_Mem *mem, m3_DfProto *proto, LUAVOID(DfData) *data,
+CFUNC int m3_array_retain_spans(m3_Mem *mem, m3_DfProto *proto, LVOID(DfData) *data,
 	uint32_t nremain)
 {
 	return array_retain_spans(mem, proto, data, mem->scratch.data,
@@ -69,7 +69,7 @@ CDEFFUNC int m3_array_retain_spans(m3_Mem *mem, m3_DfProto *proto, LUAVOID(DfDat
 
 // delete bitmap must be allocated at the start of the scratch buffer, with at least one extra
 // bit at the end.
-CDEFFUNC int m3_array_delete_bitmap(m3_Mem *mem, m3_DfProto *proto, LUAVOID(DfData) *data)
+CFUNC int m3_array_delete_bitmap(m3_Mem *mem, m3_DfProto *proto, LVOID(DfData) *data)
 {
 	uint32_t ofs = mem->scratch.len;
 	assert(!(ofs & -4));
@@ -125,7 +125,7 @@ static int array_realloc(m3_Mem *mem, void **ptr, uint32_t oldsize, uint32_t new
 	return M3_OK;
 }
 
-CDEFFUNC int m3_array_grow(m3_Mem *mem, m3_DfProto *proto, LUAVOID(DfData) *data, uint32_t n)
+CFUNC int m3_array_grow(m3_Mem *mem, m3_DfProto *proto, LVOID(DfData) *data, uint32_t n)
 {
 	if (!data->cap)
 		data->cap = ARRAY_CAP0;
@@ -145,7 +145,7 @@ CDEFFUNC int m3_array_grow(m3_Mem *mem, m3_DfProto *proto, LUAVOID(DfData) *data
 	return M3_OK;
 }
 
-CDEFFUNC int m3_array_mutate(m3_Mem *mem, m3_DfProto *proto, LUAVOID(DfData) *data)
+CFUNC int m3_array_mutate(m3_Mem *mem, m3_DfProto *proto, LVOID(DfData) *data)
 {
 	size_t num = data->num;
 	size_t cap = data->cap;

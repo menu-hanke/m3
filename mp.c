@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "def.h"
+#include "mem.h"
 
 #include <lua.h>
 
@@ -13,14 +14,11 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sched.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <linux/futex.h>
-#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <time.h>
 
 #if M3_x86
@@ -67,10 +65,6 @@ CDEF typedef struct m3_Shared {
 	m3_Heap heap;
 } m3_Shared;
 
-CDEF typedef struct m3_Proc {
-	m3_Futex park;
-} m3_Proc;
-
 #define MSG_FREE 0
 #define MSG_REF  1
 #define MSG_DEAD 2
@@ -84,6 +78,15 @@ CDEF typedef struct m3_Message {
 	uint32_t len;
 	uint8_t data[];
 } m3_Message;
+
+CDEF typedef struct m3_Proc {
+	m3_Futex park;
+} m3_Proc;
+
+CDEF typedef struct m3_ProcPrivate {
+	m3_Heap heap;  // this proc's shared memory heap
+	m3_Vec msg;    // [m3_Message *] all messages ever allocated by this proc
+} m3_ProcPrivate;
 
 /* ---- Shared memory layout ------------------------------------------------ */
 
@@ -164,13 +167,13 @@ timeout:
 	}
 }
 
-CDEFFUNC void m3__mp_proc_park(m3_Proc *proc)
+CFUNC void m3_mp_proc_park(m3_Proc *proc)
 {
 	if (LIKELY(__atomic_fetch_sub(&proc->park, 1, __ATOMIC_ACQUIRE) == MP_PARK_NOTIFIED)) return;
 	mp_proc_park_wait(proc, 0);
 }
 
-CDEFFUNC int m3__mp_proc_park_timeout(m3_Proc *proc, uint64_t timeout)
+CFUNC int m3_mp_proc_park_timeout(m3_Proc *proc, uint64_t timeout)
 {
 	if (LIKELY(__atomic_fetch_sub(&proc->park, 1, __ATOMIC_ACQUIRE) == MP_PARK_NOTIFIED)) return 0;
 	return mp_proc_park_wait(proc, timeout);
@@ -205,7 +208,7 @@ COLD static void mp_mutex_lock_contended(m3_Mutex *mutex)
 	}
 }
 
-CDEFFUNC void m3__mp_mutex_lock(m3_Mutex *mutex)
+static void mp_mutex_lock(m3_Mutex *mutex)
 {
 	m3_Futex v = MUTEX_UNLOCKED;
 	if (LIKELY(__atomic_compare_exchange_n(&mutex->state, &v, MUTEX_LOCKED, 1,
@@ -214,7 +217,7 @@ CDEFFUNC void m3__mp_mutex_lock(m3_Mutex *mutex)
 	mp_mutex_lock_contended(mutex);
 }
 
-CDEFFUNC void m3__mp_mutex_unlock(m3_Mutex *mutex)
+static void mp_mutex_unlock(m3_Mutex *mutex)
 {
 	if (UNLIKELY(__atomic_exchange_n(&mutex->state, MUTEX_UNLOCKED, __ATOMIC_RELEASE)
 				== MUTEX_CONTENDED))
@@ -234,7 +237,7 @@ AINLINE static size_t mp_clssize(size_t cls)
 	return 1ULL << (cls+MP_HEAP_MINCLS);
 }
 
-CDEFFUNC void *m3__mp_heap_bump(m3_Heap *heap, size_t size)
+static void *mp_heap_bump(m3_Heap *heap, size_t size)
 {
 	assert(!(size & (mp_clssize(0)-1)));
 	void *ptr = (void *) heap->cursor;
@@ -257,14 +260,12 @@ CDEFFUNC void *m3__mp_heap_bump(m3_Heap *heap, size_t size)
 	return ptr;
 }
 
-CDEFFUNC void *m3__mp_heap_bump_cls(m3_Heap *heap, size_t cls)
+static void *mp_heap_bump_cls(m3_Heap *heap, size_t cls)
 {
-	return m3__mp_heap_bump(heap, mp_clssize(cls));
+	return mp_heap_bump(heap, mp_clssize(cls));
 }
 
-// ideally this would be written in Lua, but since LuaJIT doesn't have clz,
-// we can't really have a good implementation of mp_sizecls() in Lua.
-CDEFFUNC void *m3__mp_heap_get_free(m3_Heap *heap, size_t *size)
+static void *mp_heap_get_free(m3_Heap *heap, size_t *size)
 {
 	size_t cls = mp_sizecls(*size);
 	*size = cls;
@@ -274,7 +275,7 @@ CDEFFUNC void *m3__mp_heap_get_free(m3_Heap *heap, size_t *size)
 	return (void *) ptr;
 }
 
-CDEFFUNC void *m3__mp_heap_get_free_cls(m3_Heap *heap, size_t cls)
+static void *mp_heap_get_free_cls(m3_Heap *heap, size_t cls)
 {
 	uintptr_t ptr = heap->freelist[cls];
 	if (LIKELY(ptr))
@@ -288,30 +289,52 @@ static void mp_heap_free_cls(m3_Heap *heap, uintptr_t ptr, size_t cls)
 	heap->freelist[cls] = ptr;
 }
 
-CDEFFUNC void *m3__mp_heap_alloc(m3_Heap *heap, size_t size)
+CFUNC void *m3_mp_heap_alloc(m3_Heap *heap, size_t size)
 {
-	void *ptr = m3__mp_heap_get_free(heap, &size);
+	void *ptr = mp_heap_get_free(heap, &size);
 	if (LIKELY(ptr)) {
 		return ptr;
 	} else {
-		return m3__mp_heap_bump_cls(heap, size);
+		return mp_heap_bump_cls(heap, size);
 	}
-}
-
-CDEFFUNC void m3__mp_heap_free(m3_Heap *heap, void *ptr, size_t size)
-{
-	mp_heap_free_cls(heap, (uintptr_t) ptr, mp_sizecls(size));
 }
 
 /* ---- Message management -------------------------------------------------- */
 
-CDEFFUNC void m3__mp_msg_sweep(m3_Heap *heap, m3_Message **messages, size_t num)
+static void mp_proc_sweep(m3_ProcPrivate *pp)
 {
-	for (size_t i=0; i<num; i++) {
+	m3_Message **messages = pp->msg.data;
+	size_t nmes = pp->msg.len / sizeof(*messages);
+	size_t i = 0;
+	while (i < nmes) {
 		m3_Message *mes = messages[i];
-		if (mes->state == MSG_DEAD)
-			mp_heap_free_cls(heap, (uintptr_t) mes, mes->cls);
+		if (mes->state == MSG_DEAD) {
+			mp_heap_free_cls(&pp->heap, (uintptr_t) mes, mes->cls);
+			messages[i] = messages[--nmes];
+		} else {
+			i++;
+		}
 	}
+	pp->msg.len = i * sizeof(*messages);
+}
+
+CFUNC m3_Message *m3_mp_proc_alloc_message(m3_ProcPrivate *pp, uint16_t chan, size_t size)
+{
+	size_t len = size;
+	size += sizeof(m3_Message);
+	m3_Message *msg = mp_heap_get_free(&pp->heap, &size);
+	if (UNLIKELY(!msg)) {
+		mp_proc_sweep(pp);
+		msg = mp_heap_get_free_cls(&pp->heap, size);
+		if (UNLIKELY(!msg))
+			msg = mp_heap_bump_cls(&pp->heap, size);
+	}
+	*mem_vec_allocT(&pp->msg, m3_Message *) = msg;
+	msg->state = MSG_REF;
+	msg->len = len;
+	msg->cls = size;
+	msg->chan = chan;
+	return msg;
 }
 
 /* ---- Futures ------------------------------------------------------------- */
@@ -323,7 +346,7 @@ CDEFFUNC void m3__mp_msg_sweep(m3_Heap *heap, m3_Message **messages, size_t num)
 // use an atomic (release) store. other writes don't use atomic stores.
 // therefore, after this function returns true, the *only* assumption you may make
 // is that you can read `fut->data`.
-CDEFFUNC int m3__mp_future_completed(m3_Future *fut)
+CFUNC int m3_mp_future_completed(m3_Future *fut)
 {
 	return __atomic_load_n(&fut->state, __ATOMIC_ACQUIRE) == FUT_COMPLETED;
 }
@@ -336,7 +359,7 @@ CDEF typedef struct m3_Event {
 	uint32_t flag;
 } m3_Event;
 
-CDEFFUNC void m3__mp_event_wait(m3_Event *event, uint32_t value, m3_Future *fut)
+CFUNC void m3_mp_event_wait(m3_Event *event, uint32_t value, m3_Future *fut)
 {
 	uint32_t flag = event->flag;
 	if (flag != value) {
@@ -345,25 +368,25 @@ complete:
 		fut->data = flag;
 		return;
 	}
-	m3__mp_mutex_lock(&event->lock);
+	mp_mutex_lock(&event->lock);
 	flag = event->flag;
 	if (flag != value) {
-		m3__mp_mutex_unlock(&event->lock);
+		mp_mutex_unlock(&event->lock);
 		goto complete;
 	}
 	fut->state = (uintptr_t) event->waiters;
 	event->waiters = fut;
-	m3__mp_mutex_unlock(&event->lock);
+	mp_mutex_unlock(&event->lock);
 }
 
-CDEFFUNC void m3__mp_event_set(m3_Event *event, uint32_t flag)
+CFUNC void m3_mp_event_set(m3_Event *event, uint32_t flag)
 {
 	if (event->flag == flag) return;
-	m3__mp_mutex_lock(&event->lock);
+	mp_mutex_lock(&event->lock);
 	event->flag = flag;
 	m3_Future *fut = event->waiters;
 	event->waiters = NULL;
-	m3__mp_mutex_unlock(&event->lock);
+	mp_mutex_unlock(&event->lock);
 	while (fut) {
 		uintptr_t info = fut->state;
 		fut->data = flag;
@@ -400,11 +423,11 @@ struct m3_Queue {
 
 CDEF typedef struct m3_Queue m3_Queue;
 
-CDEFFUNC m3_Queue *m3__mp_queue_new(m3_Heap *heap, size_t size)
+CFUNC m3_Queue *m3_mp_queue_new(m3_Heap *heap, size_t size)
 {
 	if (size & (size-1))
 		size = 1ULL << (64 - __builtin_clzll(size));
-	m3_Queue *queue = m3__mp_heap_bump(heap, sizeof(*queue)+size*sizeof(*queue->slots));
+	m3_Queue *queue = mp_heap_bump(heap, sizeof(*queue)+size*sizeof(*queue->slots));
 	for (size_t i=0; i<size; i++)
 		queue->slots[i].stamp = i;
 	queue->rmask = size-1;
@@ -412,7 +435,7 @@ CDEFFUNC m3_Queue *m3__mp_queue_new(m3_Heap *heap, size_t size)
 	return queue;
 }
 
-CDEFFUNC void m3__mp_queue_write(m3_Queue *queue, uintptr_t data, m3_Future *fut)
+CFUNC void m3_mp_queue_write(m3_Queue *queue, uintptr_t data, m3_Future *fut)
 {
 	uint64_t mask = queue->wmask;
 again:
@@ -449,10 +472,10 @@ again:
 					// it's case (2): we now have full control over the read pointer;
 					// no read may proceed until we finish this write.
 					// therefore we may forward the read from the waiting future.
-					m3__mp_mutex_lock(&queue->rfut_lock);
+					mp_mutex_lock(&queue->rfut_lock);
 					m3_Future *rfut = queue->rfut;
 					if (rfut) queue->rfut = (m3_Future *) rfut->state;
-					m3__mp_mutex_unlock(&queue->rfut_lock);
+					mp_mutex_unlock(&queue->rfut_lock);
 					if (!rfut) {
 						// the pending future was cleared by the a previous write before we
 						// loaded the read pointer.
@@ -479,10 +502,10 @@ again:
 		} else if (stamp < write) {
 			// the queue is full.
 			fut->data = data;
-			m3__mp_mutex_lock(&queue->wfut_lock);
+			mp_mutex_lock(&queue->wfut_lock);
 			fut->state = (uintptr_t) queue->wfut;
 			__atomic_store_n(&queue->wfut, fut, __ATOMIC_SEQ_CST);
-			m3__mp_mutex_unlock(&queue->wfut_lock);
+			mp_mutex_unlock(&queue->wfut_lock);
 			uint64_t read = __atomic_load_n(&queue->read, __ATOMIC_SEQ_CST);
 			if (write-read == mask+1) {
 				// the queue is definitely still full.
@@ -494,17 +517,17 @@ again:
 				//   (1) `fut` is in the pending write list and we should remove it and retry; or
 				//   (2) `fut` is not in the pending write list, which means a read operation
 				//       has forwarded it in which case we may return.
-				m3__mp_mutex_lock(&queue->wfut_lock);
+				mp_mutex_lock(&queue->wfut_lock);
 				for (m3_Future **wf=&queue->wfut; *wf; wf=(m3_Future**)&(*wf)->state) {
 					if (*wf == fut) {
 						// case (1): unlink `fut` and try again
 						*wf = (m3_Future *) fut->state;
-						m3__mp_mutex_unlock(&queue->wfut_lock);
+						mp_mutex_unlock(&queue->wfut_lock);
 						goto again;
 					}
 				}
 				// case (2): our write was forwarded and we can leave.
-				m3__mp_mutex_unlock(&queue->wfut_lock);
+				mp_mutex_unlock(&queue->wfut_lock);
 				return;
 			}
 		} else {
@@ -514,7 +537,7 @@ again:
 	}
 }
 
-CDEFFUNC void m3__mp_queue_read(m3_Queue *queue, m3_Future *fut)
+CFUNC void m3_mp_queue_read(m3_Queue *queue, m3_Future *fut)
 {
 	uint64_t mask = queue->rmask;
 again:
@@ -551,10 +574,10 @@ again:
 					// it's case (2): we now have full control over the write pointer;
 					// no write may proceed until we finish this read.
 					// therefore we may forward the write from the waiting future.
-					m3__mp_mutex_lock(&queue->wfut_lock);
+					mp_mutex_lock(&queue->wfut_lock);
 					m3_Future *wfut = queue->wfut;
 					if (wfut) queue->wfut = (m3_Future *) wfut->state;
-					m3__mp_mutex_unlock(&queue->wfut_lock);
+					mp_mutex_unlock(&queue->wfut_lock);
 					if (!wfut) {
 						// the pending future was cleared by a previous read before we
 						// loaded the write pointer.
@@ -582,10 +605,10 @@ again:
 			}
 		} else if (stamp < read+1) {
 			// the queue is empty.
-			m3__mp_mutex_lock(&queue->rfut_lock);
+			mp_mutex_lock(&queue->rfut_lock);
 			fut->state = (uintptr_t) queue->rfut;
 			__atomic_store_n(&queue->rfut, fut, __ATOMIC_SEQ_CST);
-			m3__mp_mutex_unlock(&queue->rfut_lock);
+			mp_mutex_unlock(&queue->rfut_lock);
 			uint64_t write = __atomic_load_n(&queue->write, __ATOMIC_SEQ_CST);
 			if (write == read) {
 				// the queue is definitely still empty.
@@ -597,17 +620,17 @@ again:
 				//   (1) `fut` is in the pending read list and we should remove it and retry; or
 				//   (2) `fut` is not in the pending read list, which means a write operation
 				//       has forwarded it in which case we may return.
-				m3__mp_mutex_lock(&queue->rfut_lock);
+				mp_mutex_lock(&queue->rfut_lock);
 				for (m3_Future **rf=&queue->rfut; *rf; rf=(m3_Future**)&(*rf)->state) {
 					if (*rf == fut) {
 						// case (1): unlink `fut` and try again.
 						*rf = (m3_Future *) fut->state;
-						m3__mp_mutex_unlock(&queue->rfut_lock);
+						mp_mutex_unlock(&queue->rfut_lock);
 						goto again;
 					}
 				}
 				// case (2): our read was forwarded and we can leave.
-				m3__mp_mutex_unlock(&queue->rfut_lock);
+				mp_mutex_unlock(&queue->rfut_lock);
 				return;
 			}
 			return;
@@ -617,31 +640,5 @@ again:
 		}
 	}
 }
-
-/* ---- System -------------------------------------------------------------- */
-
-CDEFFUNC int m3__mp_fork(void)
-{
-	pid_t pid = fork();
-	if (!pid)
-		prctl(PR_SET_PDEATHSIG, SIGTERM);
-	return pid;
-}
-
-CDEFFUNC int m3__mp_reap(int pid)
-{
-	return waitpid(pid, NULL, WNOHANG);
-}
-
-CDEFFUNC int m3__mp_num_cpus(void)
-{
-	cpu_set_t set;
-	CPU_ZERO(&set);
-	if (sched_getaffinity(0, sizeof(set), &set))
-		return 1;
-	return CPU_COUNT(&set);
-}
-
-/* -------------------------------------------------------------------------- */
 
 #endif

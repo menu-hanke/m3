@@ -1,3 +1,4 @@
+local C = require "m3_C"
 local cdata = require "m3_cdata"
 local code = require "m3_code"
 local mem = require "m3_mem"
@@ -6,10 +7,9 @@ local ffi = require "ffi"
 local buffer = require "string.buffer"
 require "table.new"
 local load = code.load
-local check = cdata.check
 local mem_alloc, mem_realloc, mem_state, iswritable = mem.alloc, mem.realloc, mem.state, mem.iswritable
 local tonumber, type = tonumber, type
-local C, alignof, cast, ffi_copy, ffi_fill, sizeof, typeof = ffi.C, ffi.alignof, ffi.cast, ffi.copy, ffi.fill, ffi.sizeof, ffi.typeof
+local alignof, cast, ffi_copy, ffi_fill, sizeof, typeof = ffi.alignof, ffi.cast, ffi.copy, ffi.fill, ffi.sizeof, ffi.typeof
 local band, bor, lshift, rshift = bit.band, bit.bor, bit.lshift, bit.rshift
 local max, min = math.max, math.min
 
@@ -100,7 +100,7 @@ local function df_mutate(df, col, realloc)
 		end
 	else
 		if df.num > 0 then
-			check(C.m3_array_mutate(mem_state, df["m3$cproto"], df))
+			C.check(C.m3_array_mutate(mem_state, df["m3$cproto"], df))
 		else
 			df.cap = 0
 		end
@@ -120,7 +120,7 @@ end
 local function df_alloc(df, n)
 	local num = df.num
 	if num+n > df.cap then
-		check(C.m3_array_grow(mem_state, df["m3$cproto"], df, n))
+		C.check(C.m3_array_grow(mem_state, df["m3$cproto"], df, n))
 	else
 		df.num = num+n
 		df_mutate(df)
@@ -185,7 +185,7 @@ local function df_clear(df, idx)
 			deletemap[k] = bor(deletemap[k], lshift(1ull, band(j, 0x3f)))
 		end
 		-- this also resets the scratch buffer
-		check(C.m3_array_delete_bitmap(mem_state, df["m3$cproto"], df))
+		C.check(C.m3_array_delete_bitmap(mem_state, df["m3$cproto"], df))
 	elseif type(idx) == "number" then
 		-- TODO: do retain_sparse with two spans
 		error("TODO")
@@ -227,7 +227,7 @@ local function df_clearmask(df, mask)
 		i = i+1
 	end
 	::clear::
-	check(C.m3_array_retain_spans(mem_state, df["m3$cproto"], df, remain))
+	C.check(C.m3_array_retain_spans(mem_state, df["m3$cproto"], df, remain))
 end
 
 local function df_overwrite(df, col, src)

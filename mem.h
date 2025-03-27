@@ -2,9 +2,13 @@
 
 #include "def.h"
 
-// don't typedef these, because struct and function definitions are fed directly to ffi.cdef
+#if M3_LUADEF
 #define FrameId    uint16_t
 #define Mask       uint64_t
+#else
+typedef uint16_t   FrameId;
+typedef uint64_t   Mask;
+#endif
 // +----------+-------+------+
 // |   15..2  |   1   |   0  |
 // +----------+-------+------+
@@ -47,7 +51,7 @@ CDEF typedef struct m3_Mem {
 	m3_Frame *ftab;          // savepoint data (maxframe)
 	FrameId *fblock;         // work memory save pointers (maxframe × wnum)
 	void *fwork;             // work memory save data (maxframe × wnum × bsize)
-	LUAVOID(ObjList) **fobj; // lua objects referenced by frame (maxframe)
+	LVOID(ObjList) **fobj;   // lua objects referenced by frame (maxframe)
 	m3_Vec lfree;            // free lua object references (ObjId)
 	int32_t lfreen;          // available lfree.len, reset on new frame (signed for lua)
 	ObjId lrefmax;           // next unallocated lua object reference
@@ -59,8 +63,8 @@ CDEF typedef struct m3_Mem {
 	void *fwork0;            // fwork allocation (not aligned)
 } m3_Mem;
 
-CDEFFUNC void *m3_mem_vec_alloc(m3_Vec *vec, uint32_t size);
+CFUNC void *m3_mem_vec_alloc(m3_Vec *vec, uint32_t size);
 #define mem_vec_allocTn(v,t,n) ((t*)m3_mem_vec_alloc((v),sizeof(t)*(n)))
 #define mem_vec_allocT(v,t)    mem_vec_allocTn((v),t,1)
-NOAPI int m3_mem_alloc_bump(m3_Mem *mem, uint32_t size);
+M3_NOAPI int m3_mem_alloc_bump(m3_Mem *mem, uint32_t size);
 #define mem_iswritable(m,p) (((uintptr_t)(p) - (uintptr_t)(m)->chunk) < (m)->chunktop)

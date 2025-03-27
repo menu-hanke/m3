@@ -1,4 +1,3 @@
-local environment = require "m3_environment"
 local ffi = require "ffi"
 local buffer = require "string.buffer"
 
@@ -12,27 +11,20 @@ local proccolor = {
 	"\x1b[1;33m", "\x1b[1;34m", "\x1b[1;35m", "\x1b[1;36m"
 }
 
-local function trace_plain(s)
-	-- NOTE: keep this as a single write() call to keep it atomic
-	-- (assuming unbuffered stderr up to 4KB, ie. don't rely on it),
-	-- so debug messages from workers don't get mixed up.
-	io.stderr:write(s.."\n")
-end
-
-local trace = trace_plain
-if environment.parallel then
-	require("m3_mp").proc_init(function(id)
-		if colorterm and id>0 then
-			trace = function(s)
-				local c = id%(#proccolor+1)
-				trace_plain(string.format("[%s%d\x1b[0m] %s", proccolor[c], id, s))
-			end
+-- NOTE: keep this as a single write() call to keep it atomic
+-- (assuming unbuffered stderr up to 4KB, ie. don't rely on it),
+-- so debug messages from workers don't get mixed up.
+local function trace(s)
+	local id = M3_PROC_ID
+	if id then
+		if colorterm then
+			local c = id%(#proccolor+1)
+			s = string.format("[%s%d\x1b[0m] %s", proccolor[c], id, s)
 		else
-			trace = function(s)
-				trace_plain(string.format("[%d] %s", id, s))
-			end
+			s = string.format("[%d] %s", id, s)
 		end
-	end)
+	end
+	io.stderr:write(s.."\n")
 end
 
 ---- pretty printing -----------------------------------------------------------
@@ -370,7 +362,7 @@ end
 --------------------------------------------------------------------------------
 
 return {
-	trace    = settrace,
+	settrace = settrace,
 	event    = event,
 	enabled  = enabled,
 	putpp    = putpp,

@@ -2,6 +2,12 @@
 
 #include "target.h"
 
+// enable threading support?
+// this causes sqlite to be with threading enabled which builds a slightly larger and slower binary.
+#ifndef M3_USE_THREADS
+#define M3_USE_THREADS                 0
+#endif
+
 // size of shared virtual memory mapping in multiprocess mode (per process).
 // this must be a power of two.
 // virtual memory is committed lazily, so you can put a huge number here.

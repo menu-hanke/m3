@@ -12,28 +12,35 @@
 #define COLD                 __attribute__((cold))
 #define NORETURN             __attribute__((noreturn))
 
-#ifndef NOAPI
-#if __ELF__
-#define NOAPI                __attribute__((visibility("hidden"))) extern
+#if M3_AMALG
+#define M3_HIDDEN            static
+#define M3_NOAPI             M3_HIDDEN
 #else
-#define NOAPI
+#if __ELF__
+#define M3_HIDDEN            __attribute__((visibility("hidden")))
+#else
+#define M3_HIDDEN
 #endif
+#define M3_NOAPI             M3_HIDDEN extern
 #endif
 
-#if M3_WINDOWS
-#define LUAFUNC              __declspec(dllexport)
+
+#define M3_FUNC              M3_NOAPI
+#define M3_DATA              M3_NOAPI
+#if M3_AMALG
+#define M3_DATADEF           static
 #else
-#define LUAFUNC
+#define M3_DATADEF
 #endif
 
 #ifdef M3_LUADEF
 #define CDEF                 @cdef@
-#define LUADEF(...)          @lua@ __VA_ARGS__
-#define LUAVOID(x)           void
-#define CDEFFUNC             CDEF
+#define CFUNC                @cfunc@
+#define LDEF(...)            @lua@ __VA_ARGS__
+#define LVOID(x)             void
 #else
 #define CDEF
-#define LUADEF(...)
-#define LUAVOID(x)           x
-#define CDEFFUNC             LUAFUNC
+#define CFUNC                M3_FUNC
+#define LDEF(...)
+#define LVOID(x)             x
 #endif

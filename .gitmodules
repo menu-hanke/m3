@@ -7,3 +7,6 @@
 [submodule "sqlite"]
 	path = sqlite
 	url = https://github.com/sqlite/sqlite
+[submodule "sqlite-lua"]
+	path = sqlite-lua
+	url = https://github.com/taplem/sqlite-lua

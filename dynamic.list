@@ -1,7 +1,3 @@
 {
-	m3_*;
 	lua*;
-	luaJIT_*;
-	fhk_*;
-	sqlite3_*;
 };

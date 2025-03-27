@@ -1,6 +1,16 @@
-array.o: array.c def.h target.h err.h errmsg.h mem.h
-libm3.o: libm3.c def.h target.h array.c err.h errmsg.h mem.h mem.c \
- config.h mp.c sql.h
-m3.o: m3.c target.h
-mem.o: mem.c config.h target.h def.h err.h errmsg.h mem.h
-mp.o: mp.c target.h config.h def.h
+m3_cdef.lua cdef.c amalg$(M3_CEXT).o: amalg.c def.h target.h array.c err.h errmsg.h mem.h bc.c bc.h \
+ LuaJIT/src/lua.h LuaJIT/src/luaconf.h LuaJIT/src/lauxlib.h \
+ LuaJIT/src/lua.h env.c cdef.h LuaJIT/src/lualib.h mem.c config.h sys.c \
+ host.c mp.c sql.h
+array$(M3_CEXT).o: array.c def.h target.h err.h errmsg.h mem.h
+bc$(M3_CEXT).o: bc.c def.h target.h bc.h LuaJIT/src/lua.h LuaJIT/src/luaconf.h \
+ LuaJIT/src/lauxlib.h LuaJIT/src/lua.h
+env$(M3_CEXT).o: env.c bc.h def.h target.h LuaJIT/src/lua.h LuaJIT/src/luaconf.h \
+ cdef.h err.h errmsg.h LuaJIT/src/lualib.h LuaJIT/src/lua.h \
+ LuaJIT/src/lauxlib.h
+host$(M3_CEXT).o: host.c bc.h def.h target.h LuaJIT/src/lua.h cdef.h
+m3$(M3_CEXT).o: m3.c LuaJIT/src/lua.h LuaJIT/src/luaconf.h LuaJIT/src/lauxlib.h \
+ LuaJIT/src/lua.h LuaJIT/src/lualib.h
+mem$(M3_CEXT).o: mem.c config.h target.h def.h err.h errmsg.h mem.h
+mp$(M3_CEXT).o: mp.c target.h config.h def.h mem.h
+sys$(M3_CEXT).o: sys.c def.h target.h

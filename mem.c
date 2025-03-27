@@ -58,12 +58,12 @@ static int mem_mmap(void **map, size_t size, int flags)
 	}
 }
 
-CDEFFUNC int m3_mem_map_shared(size_t size, void **map)
+CFUNC int m3_mem_map_shared(size_t size, void **map)
 {
 	return mem_mmap(map, size, MAP_SHARED|MAP_ANONYMOUS|MAP_NORESERVE);
 }
 
-CDEFFUNC void m3_mem_unmap(void *base, size_t size)
+CFUNC void m3_mem_unmap(void *base, size_t size)
 {
 	munmap(base, size);
 }
@@ -119,7 +119,7 @@ static void mem_chunk_sweep(m3_Mem *mem)
 }
 
 NOINLINE
-CDEFFUNC int m3_mem_chunk_new(m3_Mem *mem, uint32_t need)
+CFUNC int m3_mem_chunk_new(m3_Mem *mem, uint32_t need)
 {
 	if (UNLIKELY(!mem->sweep)) {
 		mem_chunk_sweep(mem);
@@ -142,7 +142,7 @@ CDEFFUNC int m3_mem_chunk_new(m3_Mem *mem, uint32_t need)
 	return M3_OK;
 }
 
-CDEFFUNC void *m3_mem_alloc(m3_Mem *mem, size_t size, size_t align)
+CFUNC void *m3_mem_alloc(m3_Mem *mem, size_t size, size_t align)
 {
 	if (UNLIKELY(size > mem->cursor)) {
 		if (UNLIKELY(m3_mem_chunk_new(mem, size)))
@@ -215,7 +215,7 @@ static void mem_save_objlist(m3_Mem *mem, size_t fp)
 	}
 }
 
-CDEFFUNC int m3_mem_save(m3_Mem *mem)
+CFUNC int m3_mem_save(m3_Mem *mem)
 {
 	size_t id = mem->frame+1;
 	FrameState newstate = (uint32_t)mem->lfreen < mem->lfree.len;
@@ -331,7 +331,7 @@ static void mem_frame_store(m3_Mem *mem, FrameId fp, Mask mask)
 	mem_copyframeptr(fblock, fblock + (fp1-fp)*wnum, mask);
 }
 
-CDEFFUNC void m3_mem_write(m3_Mem *mem, Mask mask)
+CFUNC void m3_mem_write(m3_Mem *mem, Mask mask)
 {
 	Mask unsaved = mem->unsaved;
 	assert(unsaved == ~mem->ftab[mem->frame].save);
@@ -383,7 +383,7 @@ static void mem_load_slow(m3_Mem *mem, size_t fp)
 	mem_restore(mem, bfp, restore);
 }
 
-CDEFFUNC void m3_mem_load(m3_Mem *mem, int fpx)
+CFUNC void m3_mem_load(m3_Mem *mem, int fpx)
 {
 	size_t fp = fpx;
 	assert(mem->ftab[fp].state & FRAME_ALIVE);
@@ -398,14 +398,14 @@ CDEFFUNC void m3_mem_load(m3_Mem *mem, int fpx)
 	mem_assert_fresh_frame_invariants(mem);
 }
 
-CDEFFUNC int m3_mem_newobjref(m3_Mem *mem)
+CFUNC int m3_mem_newobjref(m3_Mem *mem)
 {
 	ObjId oref = mem->lrefmax++;
 	*mem_vec_allocT(&mem->lfree, ObjId) = oref;
 	return oref;
 }
 
-CDEFFUNC void m3_mem_init(m3_Mem *mem)
+CFUNC void m3_mem_init(m3_Mem *mem)
 {
 	// objref zero is always nil
 	mem->lrefmax = 1;
@@ -418,7 +418,7 @@ CDEFFUNC void m3_mem_init(m3_Mem *mem)
 	mem_assert_fresh_frame_invariants(mem);
 }
 
-CDEFFUNC void m3_mem_destroy(m3_Mem *mem)
+CFUNC void m3_mem_destroy(m3_Mem *mem)
 {
 	m3_Frame *ftab = mem->ftab;
 	for (size_t fp=1; fp<mem->maxframe; fp++) {

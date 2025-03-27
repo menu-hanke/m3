@@ -1,17 +1,14 @@
-local cdata = require "m3_cdata"
-local cdef = require "m3_cdef"
-local shutdown = require "m3_shutdown"
+local C = require "m3_C"
 local ffi = require "ffi"
-local C = ffi.C
 local band, bor, bnot = bit.band, bit.bor, bit.bnot
 local cast, copy = ffi.cast, ffi.copy
 local uintptr_t, voidptr, objidptr = ffi.typeof("uintptr_t"), ffi.typeof("void *"), ffi.typeof("int32_t *")
-local check = cdata.check
+local check = C.check
 local event = require("m3_debug").event
 
-local CONFIG_MEM_BLOCKSIZE_MIN = cdef.CONFIG_MEM_BLOCKSIZE_MIN
+local CONFIG_MEM_BLOCKSIZE_MIN = C.CONFIG_MEM_BLOCKSIZE_MIN
 local CONFIG_MEM_BLOCKNUM_MAX  = 64
-local TARGET_CACHELINE_SIZE = cdef.TARGET_CACHELINE_SIZE
+local TARGET_CACHELINE_SIZE = C.TARGET_CACHELINE_SIZE
 local SIZEOF_OBJID = 4
 local FRAME_OBJS = 1
 local FRAME_ALIVE = 2
@@ -85,7 +82,8 @@ local function work_init(size)
 		struct { uint8_t _[%d]; }
 	]], TARGET_CACHELINE_SIZE, bsize))
 	local work = ffi.new(ffi.typeof("$[?]", block_ct), wnum)
-	mem.work = shutdown(work, "anchor")
+	_G._M3_ANCHOR_WORK_HEAP = work
+	mem.work = work
 	mem.bsize = bsize
 	mem.wnum = wnum
 	C.m3_mem_init(mem)

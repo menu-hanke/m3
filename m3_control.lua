@@ -3,6 +3,9 @@ local data = require "m3_data"
 local dbg = require "m3_debug"
 local mem = require "m3_mem"
 local buffer = require "string.buffer"
+local debug_describe = dbg.describe
+local istransaction = data.istransaction
+local mem_save, mem_load, mem_delete = mem.save, mem.load, mem.delete
 local load = code.load
 local rawget, rawset = rawget, rawset
 
@@ -33,7 +36,7 @@ local function tocontrol(x, tab_mt)
 		-- TODO: it's a query
 		error("TODO")
 	elseif type(x) == "table" then
-		if data.istransaction(x) then
+		if istransaction(x) then
 			return setmetatable({f=x}, call_mt)
 		else
 			if not tab_mt then
@@ -101,7 +104,7 @@ local function describe(node)
 		end
 		buf:put("}")
 	elseif tag == "call" or tag == "callcc" or tag == "dynamic" then
-		buf:putf("%s", dbg.describe(node.f))
+		buf:putf("%s", debug_describe(node.f))
 	elseif tag == "first" then
 		buf:put(describe(node.node))
 	end
@@ -301,7 +304,7 @@ function emit_node.call(node)
 	buf_continue(buf)
 	buf_end(buf)
 	local f = node.f
-	if data.istransaction(f) then
+	if istransaction(f) then
 		f = f.func
 	end
 	return load(buf, code.chunkname(describe(node)))(f, node)
@@ -378,7 +381,7 @@ function emit_node.any(node)
 	end
 	buf:put("::out:: mem_delete(sp) return r end\n")
 	return load(buf, code.chunkname(describe(node)))(
-		copycont, mem.save, mem.load, mem.delete, unpack(branches))
+		copycont, mem_save, mem_load, mem_delete, unpack(branches))
 end
 
 -- first -------------------------------

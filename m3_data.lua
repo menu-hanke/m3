@@ -1,15 +1,17 @@
 local array = require "m3_array"
+local C = require "m3_C"
+local db = require "m3_db"
 local cdata = require "m3_cdata"
 local code = require "m3_code"
 local dbg = require "m3_debug"
-local environment = require "m3_environment"
 local mem = require "m3_mem"
-local shutdown = require "m3_shutdown"
-local sqlite = require "m3_sqlite"
 local fhk = require "fhk"
+local sqlite = require "sqlite"
 local buffer = require "string.buffer"
 local ffi = require "ffi"
 require "table.clear"
+
+-- TODO: reorganize this file: data defs -> API -> init
 
 local load = code.load
 local event, enabled = dbg.event, dbg.enabled
@@ -185,12 +187,6 @@ local function autoselect(obj, tab, sql, rename)
 	return setmetatable({obj=obj, tab=tab, sql=sql, rename=rename}, autoselect_mt)
 end
 
--- pipe
-local pipe_mt = newmeta "pipe"
-local function pipe()
-	return setmetatable({ sink={} }, pipe_mt)
-end
-
 -- user
 local func_mt = newmeta "func"
 local function func(func, args)
@@ -227,8 +223,6 @@ local function visit(o, f, ...)
 		return visit(D.actions, f, ...)
 	elseif tag == "autoselect" then
 		return visit(o.obj, f, ...)
-	elseif tag == "pipe" then
-		return visit(o.sink, f, ...)
 	elseif tag == "func" then
 		if o.args then
 			return visit(o.args, f, ...)
@@ -528,6 +522,11 @@ local function worklayout(slots)
 	end
 end
 
+ffi.cdef [[
+	void *malloc(size_t);
+	void free(void *);
+]]
+
 local function malloc(size)
 	return ffi.gc(ffi.C.malloc(size), ffi.C.free)
 end
@@ -543,7 +542,7 @@ local function dummylayout(slots)
 	end
 	assert(align <= 16, "TODO")
 	local region = malloc(size)
-	shutdown(region, "anchor")
+	_G._M3_ANCHOR_DUMMY_REGION = region
 	for _, slot in ipairs(slots) do
 		slot.ptr = ffi.cast(ffi.typeof("$*", slot.ctype), region)
 	end
@@ -624,11 +623,7 @@ local function memlayout()
 	for o in pairs(all) do
 		if o.init then
 			if type(o.init) == "function" then
-				if environment.parallel and o.proc_init then
-					require("m3_mp").proc_init(function() o.ptr[0] = o.init() end)
-				else
-					o.ptr[0] = o.init()
-				end
+				o.ptr[0] = o.init()
 			else
 				o.ptr[0] = o.init
 			end
@@ -1033,7 +1028,7 @@ end
 -- TODO: vectors should be stored in the actionbuf as vectors, and then expanded inside the action
 -- (ie. stmt_buffer)
 function emit_write.dml(ctx, dml, value)
-	local args = ctx.uv[sqlite.statement(dml.sql)]
+	local args = ctx.uv[db.statement(dml.sql)]
 	if dml.n > 0 then args = string.format("%s, %s", args, tovalue(value)) end
 	emitbufcall(ctx, D.actions, stmt_buffer, 1+dml.n, args)
 end
@@ -1041,7 +1036,7 @@ end
 function emit_write.autoselect(ctx, asel, value)
 	assert(value, "cannot mutate autoselect")
 	local tag = gettag(asel.obj)
-	local schema = sqlite.schema(asel.tab)
+	local schema = db.schema(asel.tab)
 	if tag == "struct" then
 		local values, cols = {}, {}
 		for k,v in pairs(asel.obj.fields) do
@@ -1058,7 +1053,7 @@ function emit_write.autoselect(ctx, asel, value)
 		ctx.uv.assert = assert
 		ctx.buf:putf(
 			"local %s = %s.sqlite3_stmt\n%s:bindargs(%s)\nassert(%s:step(), 'query returned no rows')\n",
-			name, ctx.uv[sqlite.statement(sql)],
+			name, ctx.uv[db.statement(sql)],
 			name, value,
 			name
 		)
@@ -1096,7 +1091,7 @@ function emit_write.autoselect(ctx, asel, value)
 		local sqlcount = {sqlite.sql("SELECT", "COUNT(*)"), sqlite.sql("FROM", tname), asel.sql}
 		ctx.buf:putf(
 			"do\nlocal s=%s.sqlite3_stmt s:bindargs(%s) s:step() local num=s:int(0) local base=%s:alloc(num) s:reset()\n",
-			ctx.uv[sqlite.statement(sqlcount)], value, ptr
+			ctx.uv[db.statement(sqlcount)], value, ptr
 		)
 		if #names == 0 then
 			-- hack to ensure the SELECT statement compiles.
@@ -1106,7 +1101,7 @@ function emit_write.autoselect(ctx, asel, value)
 		local sql = {sqlite.sql("SELECT", unpack(names)), sqlite.sql("FROM", tname), asel.sql}
 		ctx.buf:putf(
 			"local r=%s.sqlite3_stmt r:bindargs(%s) for i=0, num-1 do r:step()\n",
-			ctx.uv[sqlite.statement(sql)], value
+			ctx.uv[db.statement(sql)], value
 		)
 		for i,c in ipairs(cols) do
 			ctx.buf:putf("%s.%s[base+i] = ", ptr, c.name)
@@ -1122,28 +1117,6 @@ function emit_write.autoselect(ctx, asel, value)
 		ctx.buf:put("end\nr:reset() end\n")
 	else
 		error(string.format("cannot autoselect into %s", tag))
-	end
-end
-
-function emit_write.pipe(ctx, pipe, value)
-	assert(value, "cannot mutate pipe")
-	if pipe.map_f then
-		local v = ctx:name()
-		ctx.buf:putf("local %s = %s(%s)\n", v, ctx.uv[pipe.map_f], value)
-		value = v
-	end
-	if pipe.filter_f then
-		ctx.buf:putf("if %s(%s) then\n", ctx.uv[pipe.filter_f], value)
-	end
-	if pipe.channel then
-		ctx.buf:putf("%s(%s)\n", ctx.uv[pipe.channel.send], value)
-	else
-		for _,sink in ipairs(pipe.sink) do
-			emitwrite(ctx, sink, value)
-		end
-	end
-	if pipe.filter_f then
-		ctx.buf:put("end\n")
 	end
 end
 
@@ -1337,7 +1310,7 @@ local function traceobjs()
 end
 
 local function trace_alloc(_, size, align)
-	local ptr = ffi.C.m3_mem_alloc(mem.state, size, align)
+	local ptr = C.m3_mem_alloc(mem.state, size, align)
 	event("alloc", tonumber(size), tonumber(align), ptr)
 	return ptr
 end
@@ -1346,7 +1319,7 @@ local function init()
 	dataflow()
 	memlayout()
 	local alloc = enabled("alloc") and ffi.cast("void *(*)(void *, size_t, size_t)", trace_alloc)
-		or ffi.C.m3_mem_alloc
+		or C.m3_mem_alloc
 	compilegraph(alloc)
 	if enabled("data") then
 		event("data", traceobjs())
@@ -1592,7 +1565,7 @@ local function transaction_sql_insert(transaction, tab, values)
 			table.insert(args, val)
 		end
 		dd:put(")")
-		sqlite.datadef(tostring(dd))
+		db.ddl(tostring(dd))
 		return transaction_action(transaction, {
 			input  = splat(args),
 			output = dml(insert, #args)
@@ -1619,29 +1592,180 @@ local function tocolsfunc(col)
 	end
 end
 
-local function transaction_autoselect(transaction, selector)
+local autoselect_map = {}
+
+local function autoselect_inspect(tab, f)
+	for i=#autoselect_map, 1, -1 do
+		local amap = autoselect_map[i]
+		local config
+		if type(amap) == "table" then
+			config = amap[tab]
+		else
+			config = amap(tab)
+		end
+		if config then
+			if type(config) == "string" then config = {table=config} end
+			local value = f(config)
+			if value then return value end
+		end
+	end
+end
+
+local function autoselect_rename(tab, col)
+	local name
+	if col then
+		name = autoselect_inspect(tab, function(config)
+			if type(config.map) == "table" then
+				return config.map[col]
+			elseif type(config.map) == "function" then
+				return config.map(col)
+			end
+		end)
+	else
+		name = autoselect_inspect(tab, function(config) return config.table end)
+	end
+	return name or col or tab
+end
+
+local function haveall(names, cols)
+	for _,col in pairs(cols) do
+		if not names[col] then return false end
+	end
+	return true
+end
+
+local function autoselect_autowhere(tab, names)
+	local schema = db.schema(tab)
+	if not schema then return end
+	-- try primary key
+	local cols = {}
+	for name,col in ipairs(schema.columns) do
+		if col.pk then cols[name] = string.format("%s_%s", tab, name) end
+	end
+	if not next(cols) then
+		-- table has no primary key, try rowid
+		-- TODO: this does not work for WITHOUT ROWID tables. this *should* check that the table
+		-- is a rowid table, which is a bit involved because none of the pragmas return that
+		-- information
+		cols.rowid = string.format("%s_rowid", tab)
+	end
+	if haveall(names, cols) then return cols end
+	-- try foreign keys
+	for _,fk in ipairs(schema.foreign_keys) do
+		table.clear(cols)
+		for from,to in pairs(fk.columns) do
+			cols[from] = string.format("%s_%s", fk.table, to)
+		end
+		if haveall(names, cols) then return cols end
+	end
+end
+
+local function autoselect_autotask()
+	local tab
+	for _,t in ipairs(D.mapping_tables) do
+		if #t.shape.fields == 0 then
+			local tname = autoselect_rename(tostring(o.name))
+			if db.schema(tname) then
+				if tab then
+					error(string.format("autotask conflict (%s, %s)", tab, tname))
+				end
+				tab = tname
+			end
+		end
+	end
+	if tab then
+		local sql = {}
+		for name,col in pairs(db.schema(tab).columns) do
+			if col.pk then
+				table.insert(sql, sqlite.sql("SELECT", sqlite.sql("AS", sqlite.escape(name),
+					string.format("%s_%s", tab, name))))
+			end
+		end
+		if #sql > 0 then
+			table.insert(sql, sqlite.sql("FROM", sqlite.escape(tab)))
+			return sql
+		else
+			return string.format("SELECT rowid AS %s_rowid FROM %s", tab, sqlite.escape(tab))
+		end
+	else
+		return "SELECT 0"
+	end
+end
+
+-- transaction_autoselect(func: tab -> sqltab, where, bind, cols)
+-- transaction_autoselect(task)
+-- transaction_autoselect() -> autotask
+local function transaction_autoselect(transaction, x)
+	if not x then
+		local sql = autoselect_autotask()
+		transaction_autoselect(transaction, sql)
+		return sql
+	end
+	local selector
+	if type(x) == "string" or type(x) == "table" then
+		local stmt = db.connection():prepare(x)
+		local names = {}
+		local ncol = stmt:colcount()
+		for i=1, ncol do
+			names[stmt:name(i-1)] = i
+		end
+		selector = function(tab)
+			local where = autoselect_inspect(tab, function(config) return config.where end)
+			local binds = {}
+			if where == nil then
+				local auto = autoselect_autowhere(tab, names)
+				if auto then
+					where = {}
+					for col,name in pairs(auto) do
+						table.insert(binds, arg(names[name]))
+						table.insert(where, string.format("%s = ?%d", sqlite.escape(col), #binds))
+					end
+					where = sqlite.sql("WHERE", unpack(where))
+				end
+			elseif where then
+				-- this breaks when `?NNN` is embedded in a string/name/whatever, but oh well.
+				local idxmap = {}
+				where = string.gsub(where, "?(%d+)", function(idx)
+					if not idxmap[idx] then
+						table.insert(binds, arg(tonumber(idx)))
+						idxmap[idx] = string.format("?%d", #binds)
+					end
+					return idxmap[idx]
+				end)
+				where = sqlite.sql("WHERE", where)
+			end
+			return autoselect_rename(tab), where, splat(binds),
+				function(col) return autoselect_rename(tab, col) end
+		end
+	else
+		selector = x
+	end
 	return transaction_action(transaction, function(action)
 		for _,t in ipairs(D.mapping_tables) do
-			local tab, sql, bind, cols = selector(tostring(t.name))
-			if tab then
-				local schema = sqlite.schema(tab)
-				if schema then
-					cols = tocolsfunc(cols)
-					local obj = D.mapping[t]
-					if gettag(obj) == "struct" then
-						-- only select fields that exist in the schema.
-						-- we don't need equivalent logic for dataframes, since they don't support
-						-- only writing a subset of the columns.
-						-- a partial write for a dataframe will fail at runtime.
-						local new = struct()
-						for k,v in pairs(obj.fields) do
-							if schema.columns[cols(k)] then
-								new.fields[k] = v
+			local obj = D.mapping[t]
+			local tag = gettag(obj)
+			if tag == "struct" or tag == "dataframe" then
+				local tab, sql, bind, cols = selector(tostring(t.name))
+				if tab then
+					local schema = db.schema(tab)
+					if schema then
+						cols = tocolsfunc(cols)
+						local obj = D.mapping[t]
+						if tag == "struct" then
+							-- only select fields that exist in the schema.
+							-- we don't need equivalent logic for dataframes, since they don't support
+							-- only writing a subset of the columns.
+							-- a partial write for a dataframe will fail at runtime.
+							local new = struct()
+							for k,v in pairs(obj.fields) do
+								if schema.columns[cols(k)] then
+									new.fields[k] = v
+								end
 							end
+							obj = new
 						end
-						obj = new
+						action(bind or splat(), autoselect(obj, tab, sql, cols))
 					end
-					action(bind or splat(), autoselect(obj, tab, sql, cols))
 				end
 			end
 		end
@@ -1679,45 +1803,6 @@ local function istransaction(x)
 	return mt and mt["m3$transaction"]
 end
 
-local shared_input, shared_output
-if environment.parallel then
-	local mp = require "m3_mp"
-	local function shpipe(dispatch)
-		local source = pipe()
-		local sink = pipe()
-		sink.sink = source.sink
-		source.channel = dispatch:channel(transaction():write(sink))
-		return source
-	end
-	shared_input = function() return shpipe(mp.work) end
-	shared_output = function() return shpipe(mp.main) end
-else
-	shared_input = pipe
-	shared_output = pipe
-end
-
-local function tosink(x)
-	if type(x) == "function" then
-		return call(x)
-	else
-		return x
-	end
-end
-
-local function connect(source, sink)
-	-- source = todataobj(source) TODO?
-	sink = tosink(sink)
-	local tag = gettag(source)
-	if tag == "pipe" then
-		table.insert(source.sink, sink)
-	else
-		-- TODO: allow arbitrary data objects here, eg. if source is an fhk expression,
-		-- then make a pipe that outputs a value whenever the expression changes
-		error(string.format("TODO connect %s -> %s", gettag(source), gettag(sink)))
-	end
-	return sink
-end
-
 --------------------------------------------------------------------------------
 
 return {
@@ -1728,14 +1813,11 @@ return {
 	ret           = ret,
 	splat         = splat,
 	func          = func,
-	pipe          = pipe,
 	commit        = abuf_commit,
-	shared_input  = shared_input,
-	shared_output = shared_output,
-	connect       = connect,
 	transaction   = transaction,
 	istransaction = istransaction,
 	define        = define,
 	defined       = defined,
 	include       = include,
+	mappers       = autoselect_map,
 }

@@ -7,7 +7,7 @@ AR             = $(CROSS)gcc-ar
 STRIP          = $(CROSS)strip
 CARGO          = cargo
 GIT            = git
-LUAJIT         = $(LUAJIT_JITPATH) $(LUAJIT_EXE)
+LUAJIT         = $(LUAJIT_EXE)
 
 # embed lua bytecode? [y]/n
 EMBEDLUA       = y
@@ -18,21 +18,6 @@ EMBEDJIT       = y
 # target system (for cross-compiler)
 TARGET_SYS     = $(HOST_SYS)
 
-# ---- Compiler & Linker options -----------------------------------------------
-
-CCOPT          = -O2
-CCWARN         = -Wall -Wextra
-CCDEBUG        =
-XCCDEBUG       = -DNDEBUG
-
-CCOPTIONS      = $(CCOPT) $(CCWARN) $(CCDEBUG) $(CFLAGS) $(XCFLAGS) $(XCCDEBUG)
-LDOPTIONS      = -Wl,--gc-sections $(LDFLAGS)
-
-ifneq (,$(CCDEBUG))
-STRIP          = :
-XCCDEBUG       =
-endif
-
 # ---- Host & target detection -------------------------------------------------
 
 ifneq (,$(findstring Windows,$(OS)))
@@ -42,49 +27,61 @@ HOST_SYS       = $(shell uname -s)
 endif
 
 TARGET_MACHINE = $(shell $(CC) -dumpmachine)
-ifneq (,$(findstring x86_64,$(TARGET_MACHINE)))
-TARGET_ARCH    = x64
-endif # else: add as needed
 
-# ---- Files and paths ---------------------------------------------------------
+# ---- Compiler & Linker options -----------------------------------------------
 
-ifeq (Windows,$(TARGET_SYS))
-TARGET_EXE     = .exe
-TARGET_SO      = .dll
+CCOPT          = -O2
+CCWARN         = -Wall -Wextra
+CCDEBUG        =
+M3_CFLAGS      = $(M3_CFLAGS_)
+M3_LDFLAGS     = -Wl,--gc-sections
+
+ifeq (,$(CCDEBUG))
+M3_CFLAGS     += -DNDEBUG
+M3_DEBUG       = 0
 else
-TARGET_SO      = .so
+STRIP          = :
+M3_DEBUG       = 1
 endif
 
-M3_A           = m3.a
-M3_EXE         = m3$(TARGET_EXE)
-M3_SO          = m3$(TARGET_SO)
-
-M3EXE_O        = libm3.o m3.o
-M3SO_O         = libm3.pic.o
-M3A_O          = libm3.o
-M3GENLUA       = m3_cdef.lua
-
-ifeq (y,$(EMBEDLUA))
-M3LUA_O        = m3.lua.o m3_array.lua.o m3_cdata.lua.o m3_cdef.lua.o m3_code.lua.o \
-				 m3_control.lua.o m3_data.lua.o m3_debug.lua.o m3_loop.lua.o \
-				 m3_mem.lua.o m3_mp.lua.o m3_mp_main.lua.o m3_mp_worker.lua.o m3_shutdown.lua.o \
-				 m3_sqlite.lua.o m3_uid.lua.o
-M3EXELUA_O     = m3_simulate.lua.o m3_test.lua.o
-endif
-
-ifeq (y,$(EMBEDJIT))
-ifneq (,$(TARGET_ARCH))
-JITDIS_O       = jit_dis_$(TARGET_ARCH).lua.o
-ifeq (x64,$(TARGET_JITARCH))
-JITDIS_O      += jit_dis_x86.lua.o
-endif
-endif
-JITLUA_O       = jit_bc.lua.o jit_dump.lua.o jit_p.lua.o jit_v.lua.o jit_vmdef.lua.o jit_zone.lua.o \
-				 $(JITDIS_O)
+ifneq (y,$(EMBEDLUA))
+M3_CFLAGS     += -DM3_LOADLUA
 endif
 
 ifneq (Windows,$(TARGET_SYS))
-M3EXE_SYMS     = -Wl,--dynamic-list=dynamic.list
+M3_LDFLAGS    += -Wl,--dynamic-list=dynamic.list
+endif
+
+CCOPTIONS      = $(CCOPT) $(CCWARN) $(CCDEBUG) $(LUAJIT_INCLUDE) $(CFLAGS) $(M3_CFLAGS)
+LDOPTIONS      = $(M3_LDFLAGS) $(LDFLAGS)
+
+# ---- Files and paths ---------------------------------------------------------
+
+M3_CMOD        = amalg $(SQLITE_ROOT)/sqlite3
+M3_LMOD        = m3_array m3_cdata m3_cdef m3_cli m3_code m3_control m3_data m3_db m3_debug m3_eval \
+				 m3_host m3_init m3_lib m3_mem
+M3_GEN         = bcode.h cdef.c m3_cdef.lua
+M3_COBJ        = $(addsuffix $(M3_CEXT).o, $(M3_CMOD))
+# top-level make sets:
+# M3_CEXT
+
+ifeq (Windows,$(TARGET_SYS))
+TARGET_EXE     = .exe
+TARGET_DLL     = .dll
+else
+TARGET_DLL     = .so
+endif
+
+M3_EXE         = m3$(TARGET_EXE)
+M3_DLL         = m3$(TARGET_DLL)
+
+M3_BCODE       = sqlite=sqlite-lua/sqlite.lua
+ifeq (y,$(EMBEDLUA))
+M3_BCODE_LUA   = $(addsuffix .lua, $(M3_LMOD))
+M3_BCODE      += $(M3_BCODE_LUA)
+endif
+ifeq (y,$(EMBEDJIT))
+M3_BCODE      += jit=$(LUAJIT_SRC)
 endif
 
 # ---- fhk ---------------------------------------------------------------------
@@ -92,13 +89,14 @@ endif
 FHK_ROOT       = fhk5
 FHK_A          = $(FHK_ROOT)/target/release/libfhk.a
 ifeq (Windows,$(TARGET_SYS))
-FHK_SO         = $(FHK_ROOT)/target/release/fhk.dll
-M3EXE_FHK      = $(FHK_SO)
+FHK_DLL        = $(FHK_ROOT)/target/release/fhk.dll
+M3EXE_FHK      = $(FHK_DLL)
 else
-FHK_SO         = $(FHK_ROOT)/target/release/libfhk.so
+FHK_DLL        = $(FHK_ROOT)/target/release/libfhk.so
 M3EXE_FHK      = -Wl,--whole-archive $(FHK_A) -Wl,--no-whole-archive
 endif
-M3SO_FHK       = $(FHK_SO)
+
+M3DLL_FHK      = $(M3EXE_FHK)
 
 # ---- LuaJIT ------------------------------------------------------------------
 
@@ -106,64 +104,59 @@ LUAJIT_ROOT    = LuaJIT
 LUAJIT_SRC     = $(LUAJIT_ROOT)/src
 LUAJIT_A       = $(LUAJIT_SRC)/libluajit.a
 LUAJIT_EXE     = $(LUAJIT_SRC)/luajit$(TARGET_EXE)
-LUAJIT_PKGPATH = $(shell $(LUAJIT_EXE) -e print\(package.path\));$(LUAJIT_SRC)/?.lua
-LUAJIT_JITPATH = LUA_PATH="$(LUAJIT_PKGPATH)"
 LUAJIT_INCLUDE = -I$(LUAJIT_SRC)
 ifeq (Windows,$(TARGET_SYS))
-LUAJIT_SO      = $(LUAJIT_SRC)/lua51.dll
-M3EXE_LUAJIT   = $(LUAJIT_SO)
+LUAJIT_DLL     = $(LUAJIT_SRC)/lua51.dll
+M3EXE_LUAJIT   = $(LUAJIT_DLL)
+M3DLL_LUAJIT   = $(LUAJIT_DLL)
 else
-LUAJIT_SO      = $(LUAJIT_SRC)/libluajit.so
+LUAJIT_DLL     = $(LUAJIT_SRC)/libluajit.so
 M3EXE_LUAJIT   = $(LUAJIT_A) -lm -ldl
+M3DLL_LUAJIT   =
 endif
-M3SO_LUAJIT    = $(LUAJIT_SO)
 
 # ---- SQLite ------------------------------------------------------------------
 
 SQLITE_ROOT    = sqlite
-SQLITE_O       = $(SQLITE_ROOT)/sqlite3.o
-SQLITE_PICO    = $(SQLITE_ROOT)/sqlite3.pic.o
 SQLITE_INCLUDE = -I$(SQLITE_ROOT)
-M3EXE_SQLITE   = $(SQLITE_O)
-M3SO_SQLITE    = $(SQLITE_PICO)
 SQLITE_CFLAGS  = -DSQLITE_CUSTOM_INCLUDE=../sql.h
 
 # ---- Targets -----------------------------------------------------------------
 
-$(M3_EXE): $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O) $(M3GENLUA)
-	$(CC) $(LDOPTIONS) $(M3EXE_O) $(M3LUA_O) $(M3EXELUA_O) $(JITLUA_O)  $(M3EXE_FHK) \
-		$(M3EXE_LUAJIT) $(M3EXE_SQLITE) $(M3EXE_SYMS) -o $@
-	$(STRIP) $@
+all: exe lib
+exe: $(M3_EXE)
+lib: $(M3_DLL)
 
-$(M3_SO): $(M3SO_O) $(M3LUA_O) $(M3GENLUA)
-	$(CC) $(LDOPTIONS) $(M3SO_O) $(M3LUA_O) $(M3GENLUA_O) $(M3SO_FHK) $(M3SO_LUAJIT) \
-		$(M3SO_SQLITE) -shared -o $@
-	$(STRIP) $@
-
-$(M3_A): $(M3A_O) $(M3LUA_O) $(M3GENLUA)
-	$(AR) rcs $@ $(M3A_O) $(M3LUA_O)
+.PHONY: amalg all exe lib
 
 # ---- Rules -------------------------------------------------------------------
 
-%.o: %.c
+ifeq (1,$(M3_MAKEREC))
+$(M3_EXE): $(M3_COBJ) $(M3_GEN)
+	$(CC) $(LDOPTIONS) $(M3_COBJ) $(M3EXE_FHK) $(M3EXE_LUAJIT) -o $@
+	$(STRIP) $@
+$(M3_DLL): $(M3_COBJ) $(M3_GEN)
+	$(CC) $(LDOPTIONS) $(M3_COBJ) $(M3DLL_FHK) $(M3DLL_LUAJIT) -shared -o $@
+	$(STRIP) $@
+else
+$(M3_EXE): $(M3_GEN)
+	$(MAKE) $@ M3_MAKEREC=1 M3_CMOD="$(M3_CMOD) m3"
+$(M3_DLL): $(M3_GEN)
+	$(MAKE) $@ M3_MAKEREC=1 M3_CEXT=_dll M3_CFLAGS_=-fPIC
+.PHONY: $(M3_EXE) $(M3_DLL)
+endif
+
+%$(M3_CEXT).o: %.c
 	$(CC) $(CCOPTIONS) -c $< -o $@
 
-%.pic.o: %.c
-	$(CC) $(CCOPTIONS) -fPIC -c $< -o $@
+$(SQLITE_ROOT)/sqlite3$(M3_CEXT).o: M3_CFLAGS += $(SQLITE_CFLAGS)
 
-%.lua.c: %.lua
-	$(LUAJIT) -b -n $(subst _,.,$(notdir $*)) $< $@
+bcode.h: $(M3_BCODE_LUA)
+	$(LUAJIT) build.lua bcode $(TARGET_MACHINE) $(M3_DEBUG) $(M3_BCODE) > $@
 
-jit_%.lua.c: $(LUAJIT_SRC)/jit/%.lua
-	$(LUAJIT) -b -n jit.$* $< $@
-
-m3_cdef.lua: libm3.o
-	$(CC) -P -E -nostdinc -DM3_LUADEF libm3.c 2>/dev/null | $(LUAJIT) luadef.lua > $@
-
-CCGITVER = $(shell GITVER=$$($(GIT) describe) && echo -DM3_GITVER='\"'$$(echo $$GITVER)'\"')
-CCLJVER  = $(shell GITVER=$$(cd $(LUAJIT_ROOT) && $(GIT) describe) && echo -DLJ_GITVER='\"'$$(echo $$GITVER)'\"')
-m3.o: XCFLAGS += $(CCGITVER) $(CCLJVER) $(LUAJIT_INCLUDE) $(SQLITE_INCLUDE)
-$(SQLITE_O) $(SQLITE_PICO): XCFLAGS += $(SQLITE_CFLAGS)
+M3_GITVER = $(shell $(GIT) describe)
+m3_cdef.lua cdef.c &:
+	$(CC) -P -E -nostdinc -DM3_LUADEF amalg.c 2>/dev/null | $(LUAJIT) build.lua cdef - $(M3_GITVER)
 
 # ---- Dependencies ------------------------------------------------------------
 
@@ -175,7 +168,6 @@ deps-luajit:
 
 deps-sqlite:
 	cd $(SQLITE_ROOT) && ./configure && $(MAKE) sqlite3.c
-	$(MAKE) $(SQLITE_O) $(SQLITE_PICO)
 
 deps: deps-fhk deps-luajit deps-sqlite
 .PHONY: deps deps-fhk deps-luajit deps-sqlite
@@ -184,10 +176,10 @@ deps: deps-fhk deps-luajit deps-sqlite
 
 depend:
 	$(MAKE) clean
-	$(CC) -MM *.c > Makefile.dep
+	$(CC) -DM3_MAKEDEP -MM *.c | sed 's/^amalg.o/m3_cdef.lua cdef.c amalg.o/; s/\.o:/$$(M3_CEXT).o:/' > Makefile.dep
 
 clean:
-	$(RM) $(M3_EXE) $(M3GENLUA) *.o *.so *.dll *.a *.lua.c
+	$(RM) $(M3_EXE) $(M3_GEN) *.o *.so *.dll *.a
 
 .PHONY: depend clean
 

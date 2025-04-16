@@ -56,6 +56,9 @@ To simulate growth, we can compute the 5-year diameter and height increments `id
 Let's create an *m3 application*, `app.lua`:
 
 ```lua
+-- include our growth models.
+data.include("models.fhk")
+
 -- read database file name from command line
 local db = assert(..., "usage: app.lua database")
 data.attach(db)

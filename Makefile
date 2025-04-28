@@ -154,6 +154,9 @@ $(SQLITE_ROOT)/sqlite3$(M3_CEXT).o: M3_CFLAGS += $(SQLITE_CFLAGS)
 bcode.h: $(M3_BCODE_LUA)
 	$(LUAJIT) build.lua bcode $(TARGET_MACHINE) $(M3_DEBUG) $(M3_BCODE) > $@
 
+# these are here because cc -MM doesn't like missing files
+amalg$(M3_CEXT).o bc$(M3_CEXT).o: bcode.h
+
 M3_GITVER = $(shell $(GIT) describe)
 m3_cdef.lua cdef.c &:
 	$(CC) -P -E -nostdinc -DM3_LUADEF amalg.c 2>/dev/null | $(LUAJIT) build.lua cdef - $(M3_GITVER)

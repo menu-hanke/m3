@@ -26,18 +26,14 @@ CFUNC void m3_err_clear(m3_Err *err)
 	}
 }
 
-#if M3_WINDOWS
-
 COLD int m3_err_set(m3_Err *err, ErrMsg msg)
 {
 	if (err) {
 		m3_err_clear(err);
 		err->ep = (char *) err2msg(msg);
 	}
-	return 1;
+	return -1;
 }
-
-#endif
 
 COLD int m3_err_sys(m3_Err *err, ErrMsg msg)
 {
@@ -49,5 +45,5 @@ COLD int m3_err_sys(m3_Err *err, ErrMsg msg)
 			err->ep = NULL;
 		}
 	}
-	return 1;
+	return -1;
 }

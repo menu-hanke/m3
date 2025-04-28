@@ -9,6 +9,7 @@
 #include "bc.c"
 #include "env.c"
 #include "err.c"
+#include "image.c"
 #include "mem.c"
 #include "sys.c"
 #include "host.c"
@@ -20,7 +21,7 @@
 
 LDEF(local global_err = ffi.gc(ffi.new("m3_Err"), _.m3_err_clear))
 LDEF(_.err = global_err)
-LDEF(function _.check(x) if x ~= 0 then error(global_err.ep ~= nil and ffi.string(global_err.ep) or nil) end end)
+LDEF(function _.check(x) if x ~= 0 then error(global_err.ep ~= nil and ffi.string(global_err.ep) or nil, 2) end end)
 
 #include "target.h"
 #include "config.h"

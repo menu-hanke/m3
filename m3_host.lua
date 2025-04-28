@@ -6,7 +6,7 @@ local select, setmetatable, type = select, setmetatable, type
 local ffi_cast, ffi_copy = ffi.cast, ffi.copy
 
 package.preload["m3.sqlite"] = function() return bcload("sqlite")(C) end
-package.preload["m3.cli"] = function() return bcload("m3_cli")() end
+package.preload["m3.cli"] = function() return bcload("m3_cli")(C) end
 
 ---- Environments --------------------------------------------------------------
 

@@ -1,3 +1,4 @@
+local C = ...
 local m3 = require "m3"
 local sqlite = require "m3.sqlite"
 local ffi = require "ffi"
@@ -6,6 +7,7 @@ local function help(progname)
 	io.stderr:write(
 		"Usage: ", progname, " [options]... [script [args]...]\n",
 [[Available options are:
+  -s path     Set simulator image to use.
   -l name     Require library `name'.
   -j cmd      Perform LuaJIT control command (in worker states).
   -O[opt]     Control LuaJIT optimizations (in worker states).
@@ -41,7 +43,7 @@ local function parseargs(progname, ...)
 			break
 		elseif f == "V" then
 			return version()
-		elseif f == "p" or f == "j" then
+		elseif f == "p" or f == "j" or f == "s" then
 			if #a == 2 then
 				i = i+1
 				if i > n then return help(progname) end
@@ -51,6 +53,12 @@ local function parseargs(progname, ...)
 			end
 			if f == "p" then
 				ret.mode = a
+			elseif f == "s" then
+				if not ret.image then
+					ret.image = a
+				else
+					ret.image = string.format("%s:%s", ret.image, a)
+				end
 			else
 				table.insert(ret.actions, {o=f, v=a})
 			end
@@ -249,9 +257,28 @@ local function test(args)
 	end
 end
 
+local function enterimage(args)
+	-- we are going to chdir() to the overlay mount, so make sure our script path is not relative
+	-- to our current dir
+	if args.script and args.script:sub(1,1) ~= "/" then
+		local buf = ffi.new("char[4096]")
+		ffi.cdef [[ char *getcwd(char *, size_t); ]]
+		if ffi.C.getcwd(buf, 4096) ~= nil then
+			args.script = string.format("%s/%s", ffi.string(buf), args.script)
+		end
+	end
+	return C.m3_image_enter(C.err, args.image)
+end
+
 local function main(...)
 	local args = parseargs(...)
 	if not args then return 1 end
+	if args.image then
+		local r = enterimage(args)
+		if r == -1 then C.check(r) end
+		if r >= 0 then return r end
+		-- else: this is the child process, perform work.
+	end
 	if args.test then
 		return test(args)
 	else

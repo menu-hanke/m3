@@ -8,6 +8,7 @@
 #include "array.c"
 #include "bc.c"
 #include "env.c"
+#include "err.c"
 #include "mem.c"
 #include "sys.c"
 #include "host.c"
@@ -17,13 +18,9 @@
 
 #ifdef M3_LUADEF
 
-LDEF(local errmsg = {)
-#define ERRDEF(_, msg) LDEF(msg),
-#include "errmsg.h"
-#undef ERRDEF
-LDEF(})
-LDEF(_.errmsg = errmsg)
-LDEF(function _.check(x) if x ~= 0 then error(errmsg[x], 2) end end)
+LDEF(local global_err = ffi.gc(ffi.new("m3_Err"), _.m3_err_clear))
+LDEF(_.err = global_err)
+LDEF(function _.check(x) if x ~= 0 then error(global_err.ep ~= nil and ffi.string(global_err.ep) or nil) end end)
 
 #include "target.h"
 #include "config.h"

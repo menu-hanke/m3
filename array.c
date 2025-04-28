@@ -35,7 +35,7 @@ static int array_retain_spans(m3_Mem *mem, m3_DfProto *proto, DfData *data,
 	mem->scratch.len = 0;
 	if (!nspan || !nremain) {
 		data->num = data->cap = 0;
-		return M3_OK;
+		return 0;
 	}
 	data->num = nremain;
 	while ((data->cap>>1) >= nremain)
@@ -56,7 +56,7 @@ static int array_retain_spans(m3_Mem *mem, m3_DfProto *proto, DfData *data,
 			ptr += n;
 		}
 	}
-	return M3_OK;
+	return 0;
 }
 
 // spans must be allocated at the start of the scratch buffer
@@ -122,7 +122,7 @@ static int array_realloc(m3_Mem *mem, void **ptr, uint32_t oldsize, uint32_t new
 	if (oldsize)
 		memcpy(p, *ptr, oldsize);
 	*ptr = p;
-	return M3_OK;
+	return 0;
 }
 
 CFUNC int m3_array_grow(m3_Mem *mem, m3_DfProto *proto, LVOID(DfData) *data, uint32_t n)
@@ -142,7 +142,7 @@ CFUNC int m3_array_grow(m3_Mem *mem, m3_DfProto *proto, LVOID(DfData) *data, uin
 		if (UNLIKELY((err = array_realloc(mem, &data->col[i], num*size, cap*size, align))))
 			return err;
 	}
-	return M3_OK;
+	return 0;
 }
 
 CFUNC int m3_array_mutate(m3_Mem *mem, m3_DfProto *proto, LVOID(DfData) *data)
@@ -159,5 +159,5 @@ CFUNC int m3_array_mutate(m3_Mem *mem, m3_DfProto *proto, LVOID(DfData) *data)
 				return err;
 		}
 	}
-	return M3_OK;
+	return 0;
 }

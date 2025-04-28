@@ -46,21 +46,21 @@ void *m3_mem_vec_alloc(m3_Vec *vec, uint32_t size)
 
 #include <sys/mman.h>
 
-static int mem_mmap(void **map, size_t size, int flags)
+static int mem_mmap(m3_Err *err, void **map, size_t size, int flags)
 {
 	void *p = mmap(NULL, size, PROT_READ|PROT_WRITE, flags, -1, 0);
 	if (p == MAP_FAILED) {
-		return M3_ERR_MMAP;
+		return m3_err_sys(err, M3_ERR_MMAP);
 	} else {
 		*map = p;
 		madvise(p, size, MADV_DONTDUMP);
-		return M3_OK;
+		return 0;
 	}
 }
 
-CFUNC int m3_mem_map_shared(size_t size, void **map)
+CFUNC int m3_mem_map_shared(m3_Err *err, size_t size, void **map)
 {
-	return mem_mmap(map, size, MAP_SHARED|MAP_ANONYMOUS|MAP_NORESERVE);
+	return mem_mmap(err, map, size, MAP_SHARED|MAP_ANONYMOUS|MAP_NORESERVE);
 }
 
 CFUNC void m3_mem_unmap(void *base, size_t size)
@@ -68,9 +68,9 @@ CFUNC void m3_mem_unmap(void *base, size_t size)
 	munmap(base, size);
 }
 
-static int mem_chunk_map(void **base, size_t size)
+static int mem_chunk_map(m3_Err *err, void **base, size_t size)
 {
-	return mem_mmap(base, size, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE);
+	return mem_mmap(err, base, size, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE);
 }
 
 static void mem_chunk_unmap(ChunkMetadata *meta)
@@ -83,14 +83,14 @@ static void mem_chunk_unmap(ChunkMetadata *meta)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-static int mem_chunk_map(void **base, size_t size)
+static int mem_chunk_map(m3_Err *err, void **base, size_t size)
 {
 	void *p = VirtualAlloc(NULL, size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
 	if (p) {
 		*base = p;
-		return M3_OK;
+		return 0;
 	} else {
-		return M3_ERR_MMAP;
+		return m3_err_set(err, M3_ERR_MMAP);
 	}
 }
 
@@ -132,14 +132,14 @@ CFUNC int m3_mem_chunk_new(m3_Mem *mem, uint32_t need)
 	while (size < need+sizeof(ChunkMetadata))
 		size <<= 1;
 	int err;
-	if (UNLIKELY((err = mem_chunk_map(&mem->chunk, size))))
+	if (UNLIKELY((err = mem_chunk_map(mem->err, &mem->chunk, size))))
 		return err;
 	mem->chunktop = size - sizeof(ChunkMetadata);
 	mem->cursor = mem->chunktop;
 	ChunkMetadata *meta = mem->chunk + mem->chunktop;
 	meta->prev = prev;
 	meta->size = size;
-	return M3_OK;
+	return 0;
 }
 
 CFUNC void *m3_mem_alloc(m3_Mem *mem, size_t size, size_t align)
@@ -161,7 +161,7 @@ int m3_mem_alloc_bump(m3_Mem *mem, uint32_t size)
 			return err;
 	}
 	mem->cursor -= size;
-	return M3_OK;
+	return 0;
 }
 
 static void mem_ftab_grow(m3_Mem *mem)

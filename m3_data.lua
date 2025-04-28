@@ -1310,7 +1310,7 @@ local function traceobjs()
 end
 
 local function trace_alloc(_, size, align)
-	local ptr = C.m3_mem_alloc(mem.state, size, align)
+	local ptr = C.m3_mem_alloc(nil, mem.state, size, align)
 	event("alloc", tonumber(size), tonumber(align), ptr)
 	return ptr
 end

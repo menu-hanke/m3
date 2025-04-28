@@ -370,7 +370,7 @@ local function fork_new(L,p)
 	-- and one extra region for alignment
 	local mapsize = C.CONFIG_MP_PROC_MEMORY*(p+3)
 	local ptr = ffi.new("void *[1]")
-	C.check(C.m3_mem_map_shared(mapsize, ptr))
+	C.check(C.m3_mem_map_shared(C.err, mapsize, ptr))
 	local map = ptr[0]
 	local base = bit.band(
 		ffi.cast("intptr_t", map)+(C.CONFIG_MP_PROC_MEMORY-1),

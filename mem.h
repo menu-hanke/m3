@@ -1,6 +1,7 @@
 #pragma once
 
 #include "def.h"
+#include "err.h"
 
 #if M3_LUADEF
 #define FrameId    uint16_t
@@ -61,6 +62,7 @@ CDEF typedef struct m3_Mem {
 	uint8_t wnum;            // number of work memory blocks (1 <= wnum <= 64)
 	uint8_t sweep;           // sweep counter for chunk allocator
 	void *fwork0;            // fwork allocation (not aligned)
+	m3_Err *err;             // error info
 } m3_Mem;
 
 CFUNC void *m3_mem_vec_alloc(m3_Vec *vec, uint32_t size);

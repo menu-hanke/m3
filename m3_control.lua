@@ -24,6 +24,7 @@ local all_mt = newmeta "all"
 local any_mt = newmeta "any"
 local call_mt = newmeta "call"
 local first_mt = newmeta "first"
+local loop_mt = newmeta "loop"
 local callcc_mt = newmeta "callcc"
 local dynamic_mt = newmeta "dynamic"
 
@@ -74,6 +75,10 @@ end
 
 local function first(node)
 	return setmetatable({node=node}, first_mt)
+end
+
+local function loop(node)
+	return setmetatable({node=tocontrol(node)}, loop_mt)
 end
 
 local function try(node)
@@ -292,6 +297,15 @@ local function buf_argscall(buf, node)
 	end
 end
 
+local function callfunc(node)
+	local f = node.f
+	if istransaction(f) then
+		return f.func
+	else
+		return f
+	end
+end
+
 function emit_node.call(node)
 	local buf = buffer.new()
 	buf:put("local rawget, f, node = rawget, ...\n")
@@ -303,11 +317,7 @@ function emit_node.call(node)
 	buf:put("if r ~= nil then return r end\n")
 	buf_continue(buf)
 	buf_end(buf)
-	local f = node.f
-	if istransaction(f) then
-		f = f.func
-	end
-	return load(buf, code.chunkname(describe(node)))(f, node)
+	return load(buf, code.chunkname(describe(node)))(callfunc(node), node)
 end
 
 -- all ---------------------------------
@@ -323,7 +333,7 @@ local function emit_chain_func(node, chain)
 	buf:put("if r ~= nil then return r end\n")
 	buf_tailcall(buf, "chain")
 	buf_end(buf)
-	return load(buf, code.chunkname(describe(node)))(node.f, node, chain)
+	return load(buf, code.chunkname(describe(node)))(callfunc(node), node, chain)
 end
 
 local function emit_chain_ctrl(node, chain)
@@ -414,6 +424,55 @@ function emit_node.first(node)
 	]], code.chunkname(describe(node)))(ctrl_first, emit(node.node))
 end
 
+-- loop --------------------------------
+
+local function emit_loop_call(node)
+	return load([[
+		local f, ctrl_continue = ...
+		local function loop_aux(stack, base, top)
+			local r = f()
+			if r == nil then return loop_aux(stack, base, top) end
+			if r == true then return ctrl_continue(stack, base, top) end
+			return r
+		end
+		return loop_aux
+	]], code.chunkname(describe(node)))(callfunc(node.node), ctrl_continue)
+end
+
+local function emit_loop(node)
+	return load([[
+		local loopid = 0
+		local ctrl, ctrl_continue = ...
+		local function loop_aux(stack, base, top)
+			if stack[top-1] == loop_aux and stack[top-2] == stack[top] then
+				return "loop.continue"
+			end
+			stack[top+1] = loop_aux
+			local r = ctrl(stack, base, top+1)
+			if r == "loop.continue" then
+				return loop_aux(stack, base, top-1)
+			end
+			if r == true then
+				return ctrl_continue(stack, base, top-1)
+			end
+			return r
+		end
+		return function(stack, base, top)
+			stack[top+1] = loopid
+			loopid = loopid+1
+			return loop_aux(stack, base, top+1)
+		end
+	]], code.chunkname(describe(node)))(emit(node.node), ctrl_continue)
+end
+
+function emit_node.loop(node)
+	if gettag(node) == "call" then
+		return emit_loop_call(node)
+	else
+		return emit_loop(node)
+	end
+end
+
 -- call/cc -----------------------------
 
 local function ctrl_callcc(stack, base, top, func)
@@ -468,6 +527,7 @@ return {
 	optional = optional,
 	call     = call,
 	first    = first,
+	loop     = loop,
 	try      = try,
 	callcc   = callcc,
 	dynamic  = dynamic,

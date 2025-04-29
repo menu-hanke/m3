@@ -12,6 +12,7 @@ _G.control = {
 	dynamic        = control.dynamic,
 	exec           = control.exec,
 	first          = control.first,
+	loop           = control.loop,
 	nothing        = control.nothing,
 	optional       = control.optional,
 	skip           = control.skip,

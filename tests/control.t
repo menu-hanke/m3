@@ -271,3 +271,36 @@ if test "control:recursion" then
 		end
 	}
 end
+
+if test "control:loop:call" then
+	local n = 0
+	local insn = control.loop(function()
+		if n == 10 then return true end
+		n = n+1
+	end)
+	control.simulate = {
+		function()
+			control.exec(insn)
+			assert(n == 10)
+		end
+	}
+end
+
+case(
+	"control:loop:insn",
+	function()
+		local state = data.cdata { ctype="struct { uint32_t bit; uint32_t value; }" }
+		local toggle = data.transaction():mutate(state, function(s) s.value = s.value+2^s.bit end)
+		local nextbit = data.transaction():mutate(state, function(s) s.bit = s.bit+1 end)
+		local getstate = data.transaction():read(state)
+		return control.all {
+			control.loop(control.all {
+				function() if getstate().bit >= 3 then return true end end,
+				control.optional(toggle),
+				nextbit,
+			}),
+			function() putnode(getstate().value) end
+		}
+	end,
+	tree { 0b111, 0b011, 0b101, 0b001, 0b110, 0b010, 0b100, 0b000 }
+)

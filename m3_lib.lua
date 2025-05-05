@@ -39,3 +39,7 @@ _G.data = {
 
 _G.pprint          = dbg.pprint
 _G.pretty          = dbg.pretty
+
+function _G.worker_id()
+	return M3_WORKER_ID or 0
+end

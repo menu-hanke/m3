@@ -396,7 +396,7 @@ local buffer = require "string.buffer"
 local ffi = require "ffi"
 local eval, disconnect, ffi_cast, ffi_copy, xpcall, traceback = m3.eval, db.disconnect, ffi.cast, ffi.copy, xpcall, debug.traceback
 local pid, heap, main2work, work2main, exit_event = ...
-_G.M3_PROC_ID = pid
+_G.M3_WORKER_ID = pid
 
 local main2work = ffi.cast("m3_Queue *", main2work)
 local work2main = ffi.cast("m3_Queue *", work2main)

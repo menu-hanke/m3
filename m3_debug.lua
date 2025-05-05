@@ -15,7 +15,7 @@ local proccolor = {
 -- (assuming unbuffered stderr up to 4KB, ie. don't rely on it),
 -- so debug messages from workers don't get mixed up.
 local function trace(s)
-	local id = M3_PROC_ID
+	local id = worker_id()
 	if id then
 		if colorterm then
 			local c = id%(#proccolor+1)

@@ -17,6 +17,7 @@ SQLITE_FUNC int sqlite3_step(sqlite3_stmt *);
 SQLITE_FUNC int sqlite3_reset(sqlite3_stmt *);
 SQLITE_FUNC int sqlite3_finalize(sqlite3_stmt *);
 SQLITE_FUNC int sqlite3_bind_double(sqlite3_stmt *, int, double);
+SQLITE_FUNC int sqlite3_bind_int64(sqlite3_stmt *, int, int64_t);
 SQLITE_FUNC int sqlite3_bind_null(sqlite3_stmt *, int);
 SQLITE_FUNC int sqlite3_bind_text(sqlite3_stmt *, int, const char *, int, void(*)(void*));
 SQLITE_FUNC double sqlite3_column_double(sqlite3_stmt *, int);

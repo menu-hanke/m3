@@ -101,15 +101,38 @@ local function unpack1(xs, i, j)
 end
 
 local function future_poll(fut)
-	if fut[0] then
+	if type(fut[0]) == "number" then
 		return true, unpack1(fut, 1, fut[0])
 	else
 		return false
 	end
 end
 
+local function future_resolve(fut, n)
+	local f = fut[0]
+	fut[0] = n
+	if f then
+		return xpcall(f, debug.traceback, unpack1(fut, 1, n))
+	else
+		return true
+	end
+end
+
+local function future_oncomplete(fut, f)
+	if type(fut[0]) == "number" then
+		f(unpack1(fut, 1, fut[0]))
+	elseif fut[0] then
+		local g = fut[0]
+		fut[0] = function(...) g(...) f(...) end
+	else
+		fut[0] = f
+	end
+	return fut
+end
+
 local future_mt = {
-	poll = future_poll
+	poll       = future_poll,
+	oncomplete = future_oncomplete
 }
 future_mt.__index = future_mt
 
@@ -131,8 +154,13 @@ local function serial_flush(serial)
 	while #decoder > 0 do
 		local n = decoder:decode()
 		local fut = serial.pending[i]
-		fut[0] = n
 		decodeunpack(fut, 1, n)
+		local ok, err = future_resolve(fut, n)
+		if not ok then
+			table.clear(serial.pending)
+			serial.n_pending = 0
+			error(err, 0)
+		end
 		i = i+1
 	end
 	table.clear(serial.pending)
@@ -241,7 +269,8 @@ local function fork_recv(pool, msg)
 	local ok = decoder:decode()
 	local err
 	if ok then
-		fut[0] = fork_decode(fut, 0)
+		local n = fork_decode(fut, 0)
+		ok, err = future_resolve(fut, n)
 	else
 		err = decoder:decode()
 		fut[0] = 0

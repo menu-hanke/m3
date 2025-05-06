@@ -15,6 +15,7 @@ local function help(progname)
   -V          Show version.
   -v[flags]   Verbose output.
   -t[tests]   Test simulator.
+  -q          Disable progress indicator (quiet).
   --          Stop handling options.]],
   "\n")
 end
@@ -67,6 +68,8 @@ local function parseargs(progname, ...)
 		elseif f == "t" then
 			if not ret.test then ret.test = {} end
 			ret.test[a == "-t" and "*" or a:sub(3)] = true
+		elseif f == "q" then
+			ret.quiet = true
 		else
 			return help(progname)
 		end
@@ -170,12 +173,60 @@ end
 	}
 end
 
+local function eval_quiet(pool, task)
+	return function(...) return pool:eval(task.simulate, ...) end
+end
+
+local function updateprogress(submitted, completed, total)
+	io.stderr:write(string.format(
+		"\r[%-50s] %d (%d) / %d",
+		(">"):rep(50*completed/total),
+		completed,
+		submitted,
+		total
+	))
+	if completed == total then
+		io.stderr:write("\n")
+	end
+	io.stderr:flush()
+end
+
+local function eval_progress(pool, task, con)
+	local query = { sqlite.sql("SELECT", "COUNT(*)"), sqlite.sql("FROM", task.query) }
+	local count = con:row(query)[1]
+	if count == 1 then
+		return eval_quiet(pool, task)
+	end
+	local submitted, completed = 0, 0
+	return function(...)
+		submitted = submitted+1
+		updateprogress(submitted, completed, count)
+		return pool:eval(task.simulate, ...):oncomplete(function()
+			completed = completed+1
+			updateprogress(submitted, completed, count)
+		end)
+	end
+end
+
+local function isatty(fd)
+	if jit.os == "Windows" then
+		-- TODO
+		return false
+	else
+		ffi.cdef [[ int isatty(int); ]]
+		return ffi.C.isatty(fd) == 1
+	end
+end
+
 local function simulate(args)
 	local pool, task = m3.pool(function(env) return init(env, args) end, args.mode)
 	local con = sqlite.open(task.url):gc()
 	con:execscript(task.ddl)
+	local eval = (args.quiet or not isatty(2))
+		and eval_quiet(pool, task)
+		or eval_progress(pool, task, con)
 	for row in con:rows(task.query) do
-		pool:eval(task.simulate, row:unpack())
+		eval(row:unpack())
 	end
 	m3.wait(pool)
 	pool:close()

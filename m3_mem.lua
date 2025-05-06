@@ -25,6 +25,14 @@ local lfin = { [0]=nil }
 
 local function mem_save()
 	local fp = C.m3_mem_save(mem)
+	if fp < 0 then
+		-- TODO: this restriction is currently needed because the frame is marked dead and
+		-- can be immediately reused, as long as it has no children. this should be fixed by
+		-- adding an additional bit between FRAME_ALIVE and FRAME_CHILD(ren) that is set
+		-- on frame enter and cleared on frame exit, that prevents this frame from being
+		-- allocated. then this check, and the corresponding check in mem.c can be removed.
+		error("attempt to save on dead frame")
+	end
 	event("save", fp)
 	return fp
 end

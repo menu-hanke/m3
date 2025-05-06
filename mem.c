@@ -217,6 +217,8 @@ static void mem_save_objlist(m3_Mem *mem, size_t fp)
 
 CFUNC int m3_mem_save(m3_Mem *mem)
 {
+	if (UNLIKELY(!(mem->ftab[mem->frame].state & FRAME_ALIVE)))
+		return -1;
 	size_t id = mem->frame+1;
 	FrameState newstate = (uint32_t)mem->lfreen < mem->lfree.len;
 	for (;;id++) {

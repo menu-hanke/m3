@@ -80,6 +80,10 @@ local function fill(dst, i, v, n)
 end
 
 local function copyext(dst, dstnum, src, srcnum, dummy)
+	if type(src) == "number" then
+		fill(dst, 0, src, dstnum)
+		return
+	end
 	if srcnum > 0 then
 		copy(dst, src, min(dstnum, srcnum))
 	end
@@ -236,16 +240,24 @@ local function df_overwrite(df, col, src)
 	return df
 end
 
+local function dim(x)
+	if type(x) == "number" then
+		return 1
+	elseif x then
+		return #x
+	end
+end
+
 local function df_addcolsfunc(cols)
 	if #cols == 0 then return function() end end
 	local buf = buffer.new()
 	buf:put([[
 		local max = math.max
-		local copyext = ...
+		local copyext, dim = ...
 		return function(df, cols, num)
 	]])
 	for i,c in ipairs(cols) do
-		buf:putf("local num%d = cols.%s and #cols.%s or ", i, c.name, c.name)
+		buf:putf("local num%d = dim(cols.%s) or ", i, c.name)
 		if c.dummy then
 			buf:put("0\n")
 		else
@@ -265,7 +277,7 @@ local function df_addcolsfunc(cols)
 		)
 	end
 	buf:put("end")
-	return load(buf)(copyext)
+	return load(buf)(copyext, dim)
 end
 
 local function df_extend(df, tab, num)

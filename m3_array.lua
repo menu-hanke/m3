@@ -199,19 +199,17 @@ end
 local sizeof_span = sizeof("m3_Span")
 local span_p = typeof("m3_Span *")
 
--- TODO: make fhk arrays normally indexable and replace mask:get(...) -> mask[...]
--- (use an __index function to dispatch indexing/methods, luajit will optimize the check away)
 local function df_clearmask(df, mask)
 	local n = df.num
 	if n == 0 then return end
 	local i = 0
 	local remain = 0
-	if mask:get(0) then goto ones end
+	if mask[0] then goto ones end
 	::zeros::
 	do
 		local i0 = i
 		while i < n do
-			if mask:get(i) then
+			if mask[i] then
 				break
 			end
 			i = i+1
@@ -225,7 +223,7 @@ local function df_clearmask(df, mask)
 	::ones::
 	i = i+1
 	while i < n do
-		if not mask:get(i) then
+		if not mask[i] then
 			goto zeros
 		end
 		i = i+1

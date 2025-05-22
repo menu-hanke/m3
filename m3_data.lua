@@ -836,10 +836,6 @@ local abuf_commit = load([[
 	end
 ]])(abuf_commit_)
 
-local function stmt_buffer(stmt, ...)
-	return stmt:buffer(...)
-end
-
 ---- Transaction compilation ---------------------------------------------------
 
 -- Read --------------------------------
@@ -1025,12 +1021,8 @@ function emit_write.func(ctx, call, value)
 	end
 end
 
--- TODO: vectors should be stored in the actionbuf as vectors, and then expanded inside the action
--- (ie. stmt_buffer)
 function emit_write.dml(ctx, dml, value)
-	local args = ctx.uv[db.statement(dml.sql)]
-	if dml.n > 0 then args = string.format("%s, %s", args, tovalue(value)) end
-	emitbufcall(ctx, D.actions, stmt_buffer, 1+dml.n, args)
+	emitbufcall(ctx, D.actions, db.statement(dml.sql), dml.n, tovalue(value))
 end
 
 function emit_write.autoselect(ctx, asel, value)

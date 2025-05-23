@@ -115,11 +115,10 @@ local function backlog_flush()
 					stmt:reset()
 				end
 			end
-			idx = idx+2+(nvcol+1)*nvrow
+			idx = idx+2+(nvrow+1)*nvcol
 		end
 	end
 	global_statements.COMMIT.sqlite3_stmt:exec()
-	table.clear(backlog)
 end
 
 local function backlog_check()
@@ -160,7 +159,7 @@ local function backlog_expandvec(base)
 			backlog[vbase+1+nvcol*j+i] = argv[arg0+j]
 		end
 	end
-	global_backlogstate.tail = vbase+2+(nvcol+1)*nvrow
+	global_backlogstate.tail = vbase+2+(nvrow+1)*nvcol
 end
 
 local backlog_func = setmetatable({}, {

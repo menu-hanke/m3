@@ -79,6 +79,15 @@ end
 --   [base+1+i]          i'th vector argument index  (i=1,...,narg)
 --   [base+1+nvcol*j+i]  i'th vector arg of j'th row
 
+local function backlog_throw(base, msg, level)
+	local buf = buffer.new():put(msg)
+	buf:put("\n\tquery: ", global_backlog[base]:sql())
+	for i=1, global_backlog[base+1] do
+		buf:putf("\n\targ #%d: %s", i, global_backlog[base+1+i])
+	end
+	error(tostring(buf), level)
+end
+
 local function backlog_flush()
 	local tail = global_backlogstate.tail
 	local backlog = global_backlog
@@ -142,10 +151,14 @@ local function backlog_expandvec(base)
 				nrow = #v
 			else
 				if #v ~= nrow then
-					error(string.format("vector arguments lengths don't match (%d != %d)", nrow, #v))
+					backlog_throw(base, "vector argument length mismatch", 3)
 				end
 			end
 		end
+	end
+	if nrow == 0 then
+		global_backlogstate.tail = base
+		return
 	end
 	local nvrow = nrow-1
 	backlog[vbase] = nvcol

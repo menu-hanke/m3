@@ -1162,9 +1162,15 @@ local function compiletransaction(tx, graph_instance)
 	-- query, if any, must happen before any masks are set, because it may create a new instance.
 	if tx.query then
 		ctx.uv.query = tx.query.query
+		ctx.uv.query_ptrtype = ffi.typeof("$*", tx.query.ctype)
 		ctx.uv.graph_instance = graph_instance
+		ctx.uv.ffi_cast = ffi.cast
+		ctx.uv.mem_alloc = mem.alloc
 		ctx.query_field = tx.query_field
-		ctx.buf:put("local Q = query(graph_instance())\n")
+		ctx.buf:putf(
+			"local Q = query(graph_instance(), ffi_cast(query_ptrtype, mem_alloc(%d, %d)))\n",
+			ffi.sizeof(tx.query.ctype), ffi.alignof(tx.query.ctype)
+		)
 	end
 	for _,a in ipairs(tx.actions) do
 		walk(a.output, visit_mmask, ctx)

@@ -1425,8 +1425,8 @@ local function transaction_insert(transaction, a, b)
 			local newcols = {}
 			for node in pairs(D.mapping) do
 				if node.op == "VAR" then
-					local name = tostring(node.tab.name)
-					local new = a(tab, name)
+					local name = tostring(node.name)
+					local new = a(tostring(node.tab.name), name)
 					if new then
 						if not newcols[node.tab] then newcols[node.tab] = {} end
 						newcols[node.tab][name] = new

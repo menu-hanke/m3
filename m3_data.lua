@@ -399,7 +399,7 @@ local function dataflow_updategraph(dcx)
 				end
 			end
 		elseif o.op == "MOD" then
-			for _,vset in ipairs(o.value) do
+			for _,vset in ipairs(o.outputs) do
 				if not vset.var.m3_models then
 					vset.var.m3_models = {}
 				end

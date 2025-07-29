@@ -167,7 +167,8 @@ local expr_mt = newmeta "expr"
 local function expr(e)
 	local expr = D.expr[e]
 	if not expr then
-		expr = setmetatable({ e = G:expr("global", e) }, expr_mt)
+		-- deduping needed here because query creation is after dataflow. ugly but works.
+		expr = setmetatable({e=G:expr("global", e), source=e}, expr_mt)
 		if type(e) == "string" then
 			D.expr[e] = expr
 		end
@@ -735,8 +736,9 @@ local function visit_expr(o, tx)
 			tx.query = G:newquery("global")
 			tx.query_field = {}
 		end
-		if not tx.query_field[o.e] then
-			tx.query_field[o.e] = tx.query:add(o.e)
+		if not tx.query_field[o.source] then
+			tx.query_field[o.source] = tx.query:add(o.ref and o.source or o.e)
+			o.ref = true
 		end
 	end
 end
@@ -909,7 +911,7 @@ function emit_read.func(ctx, call)
 end
 
 function emit_read.expr(ctx, expr)
-	return string.format("Q.%s", ctx.query_field[expr.e])
+	return string.format("Q.%s", ctx.query_field[expr.source])
 end
 
 function emit_read.arg(ctx, arg)

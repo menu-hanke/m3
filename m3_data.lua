@@ -11,8 +11,6 @@ local buffer = require "string.buffer"
 local ffi = require "ffi"
 require "table.clear"
 
--- TODO: reorganize this file: data defs -> API -> init
-
 local load = code.load
 local event, enabled = dbg.event, dbg.enabled
 local mem_getobj = mem.getobj
@@ -279,12 +277,17 @@ D.actions = databuf()
 -- fixpoint rules:
 -- * every node that is an input to a transaction is visited
 -- * every parent node of a visited node is visited
--- * `map_table` is called for each visited table
+-- * `map_tab` is called for each visited table
 -- * `map_var` is called for each visited variable that has no models
 
 local function map_tab(node)
 	local mapping
 	if #node.shape.fields == 0 then
+		local name = tostring(node.name)
+		if name == "state" or name == "query" then
+			-- don't map special tables
+			return
+		end
 		mapping = struct()
 	else
 		local s = node.shape.fields[1]
@@ -649,13 +652,30 @@ end
 
 local map_obj = {}
 
+local function resetvalue(obj, value)
+	if next(obj.reset) then
+		local buf = buffer.new()
+		buf:put("effect(", value)
+		for reset in pairs(obj.reset) do
+			buf:put(", state.", reset)
+		end
+		buf:put(")")
+		return tostring(buf)
+	else
+		return value
+	end
+end
+
 function map_obj.memslot(obj, tab, var)
 	return string.format(
-		"model %s %s = load'%s(0x%x)",
+		"model %s %s = %s",
 		tab,
 		var,
-		fhktypename(obj.ctype),
-		ffi.cast("intptr_t", obj.ptr)
+		resetvalue(obj, string.format(
+			"load'%s(0x%x)",
+			fhktypename(obj.ctype),
+			ffi.cast("intptr_t", obj.ptr)
+		))
 	)
 end
 
@@ -663,12 +683,15 @@ function map_obj.column(obj, tab, var)
 	local dfbase = ffi.cast("intptr_t", obj.df.slot.ptr)
 	-- TODO use load'u32 for the length here when fhk supports it.
 	return string.format(
-		"model global %s.%s = load'%s(load'ptr(0x%x), load'i32(0x%x))",
+		"model global %s.%s = %s",
 		tab,
 		var,
-		fhktypename(obj.ctype),
-		dfbase + ffi.offsetof(obj.df.slot.ctype, obj.name),
-		dfbase -- `num` is at offset zero
+		resetvalue(obj, string.format(
+			"load'%s(load'ptr(0x%x), load'i32(0x%x))",
+			fhktypename(obj.ctype),
+			dfbase + ffi.offsetof(obj.df.slot.ctype, obj.name),
+			dfbase -- `num` is at offset zero
+		))
 	)
 end
 
@@ -677,10 +700,13 @@ function map_obj.size(obj, tab, var)
 	if tag == "dataframe" then
 		-- TODO: make fhk accept any integer type for table size
 		return string.format(
-			"model %s %s = load'i32(0x%x)",
+			"model %s %s = %s",
 			tab,
 			var,
-			ffi.cast("intptr_t", obj.data.slot.ptr)
+			resetvalue(obj, string.format(
+				"load'i32(0x%x)",
+				ffi.cast("intptr_t", obj.data.slot.ptr)
+			))
 		)
 	else
 		error(string.format("NYI (map size: %s)", tag))
@@ -732,13 +758,13 @@ end
 
 local function visit_expr(o, tx)
 	if gettag(o) == "expr" then
-		if not tx.query then
-			tx.query = G:newquery("global")
+		if not tx.query_field then
 			tx.query_field = {}
 		end
 		if not tx.query_field[o.source] then
-			tx.query_field[o.source] = tx.query:add(o.ref and o.source or o.e)
-			o.ref = true
+			table.insert(tx.query_field, o.e or o.source)
+			tx.query_field[o.source] = #tx.query_field
+			o.e = nil -- don't reuse the expression object (TODO(fhk): allow this (?))
 		end
 	end
 end
@@ -748,43 +774,36 @@ local function makequeries()
 		for _,a in ipairs(tx.actions) do
 			walk(a.input, visit_expr, tx)
 		end
+		if tx.query_field then
+			tx.query = G:query(unpack(tx.query_field))
+		end
 	end
 end
 
-local function visit_reset(o, tx, mapping_inverse)
-	if mapping_inverse[o] then
+local function visit_reset(o, tx)
+	if o.reset then
 		if not tx.reset then
-			tx.reset = G:newreset()
+			tx.reset = string.format("reset_%p", tx)
 		end
-		for _,node in ipairs(mapping_inverse[o]) do
-			if node.m3_default then
-				node = string.format("%s.data'{%s}", node.tab.name, node.name)
-			end
-			tx.reset:add(node)
-		end
+		o.reset[tx.reset] = true
 	end
 end
 
 local function makeresets()
-	local mapping_inverse = {}
-	-- note that mapping is not necessarily one-to-one.
-	-- one data object may be mapped to multiple variables.
-	for node,data in pairs(D.mapping) do
-		if node.op == "VAR" then
-			if gettag(data) == "size" then
-				-- size of a dataframe is changed by mutating the dataframe
-				data = data.data.slot
-			end
-			if not mapping_inverse[data] then
-				mapping_inverse[data] = {}
-			end
-			table.insert(mapping_inverse[data], node)
-		end
+	for _,data in pairs(D.mapping) do
+		data.reset = {}
 	end
-	-- compute a reset mask for every access that writes to objects that are mapped to variables
 	for _,tx in ipairs(D.transactions) do
 		for _,a in ipairs(tx.actions) do
-			walk(a.output, visit_reset, tx, mapping_inverse)
+			walk(a.output, visit_reset, tx)
+		end
+	end
+end
+
+local function readresetmasks()
+	for _,tx in ipairs(D.transactions) do
+		if tx.reset then
+			tx.reset = G.reset[tx.reset]
 		end
 	end
 end
@@ -794,9 +813,10 @@ local function compilegraph(alloc)
 	makeresets()
 	makemappings()
 	G = assert(G:compile())
+	readresetmasks()
 	-- pre-create instance so that instance creation can assume we always have a non-null instance
 	-- available
-	D.G_state.ptr.instance = G:newinstance(alloc, mem.state)
+	D.G_state.ptr.instance = G:instance(alloc, mem.state)
 	D.G_state.ptr.mask = 0
 end
 
@@ -911,7 +931,7 @@ function emit_read.func(ctx, call)
 end
 
 function emit_read.expr(ctx, expr)
-	return string.format("Q.%s", ctx.query_field[expr.source])
+	return string.format("Q.v%d", ctx.query_field[expr.source])
 end
 
 function emit_read.arg(ctx, arg)
@@ -1163,15 +1183,16 @@ local function compiletransaction(tx, graph_instance)
 	ctx.nret = 0
 	-- query, if any, must happen before any masks are set, because it may create a new instance.
 	if tx.query then
-		ctx.uv.query = tx.query.query
-		ctx.uv.query_ptrtype = ffi.typeof("$*", tx.query.ctype)
+		ctx.uv.query_exec = G[tx.query].exec
+		local ctype = G[tx.query].ctype
+		ctx.uv.query_ptrtype = ffi.typeof("$*", ctype)
 		ctx.uv.graph_instance = graph_instance
 		ctx.uv.ffi_cast = ffi.cast
 		ctx.uv.mem_alloc = mem.alloc
 		ctx.query_field = tx.query_field
 		ctx.buf:putf(
-			"local Q = query(graph_instance(), ffi_cast(query_ptrtype, mem_alloc(%d, %d)))\n",
-			ffi.sizeof(tx.query.ctype), ffi.alignof(tx.query.ctype)
+			"local Q = query_exec(graph_instance(), qparams, ffi_cast(query_ptrtype, mem_alloc(%d, %d)))\n",
+			ffi.sizeof(ctype), ffi.alignof(ctype)
 		)
 	end
 	for _,a in ipairs(tx.actions) do
@@ -1190,10 +1211,10 @@ local function compiletransaction(tx, graph_instance)
 	if tx.reset then
 		ctx.uv.G_state = D.G_state.ptr
 		if tx.query then
-			ctx.buf:putf("G_state.mask = 0x%xull\n", tx.reset.mask)
+			ctx.buf:putf("G_state.mask = 0x%xull\n", tx.reset)
 		else
 			ctx.uv.bor = bit.bor
-			ctx.buf:putf("G_state.mask = bor(G_state.mask, 0x%xull)\n", tx.reset.mask)
+			ctx.buf:putf("G_state.mask = bor(G_state.mask, 0x%xull)\n", tx.reset)
 		end
 	end
 	local inputs = {}
@@ -1211,6 +1232,10 @@ local function compiletransaction(tx, graph_instance)
 		for i=2, ctx.narg do
 			buf:putf(", arg%d", i)
 		end
+	end
+	if tx.query then
+		if ctx.narg > 0 then buf:put(",") end
+		buf:put("qparams")
 	end
 	buf:put(")\n")
 	buf:put(ctx.buf)
@@ -1239,7 +1264,7 @@ local function graph_instancefunc(alloc)
 				return state.instance
 			end
 			::new::
-			local instance = G:newinstance(alloc, memstate, state.instance, state.mask)
+			local instance = G:instance(alloc, memstate, state.instance, state.mask)
 			state.instance = instance
 			state.mask = 0
 			return instance
@@ -1336,7 +1361,15 @@ local function define(src)
 end
 
 local function defined(tab, name, ...)
-	return G:var(tab, name, false, ...) ~= nil
+	local v = G:var(tab, name, false, ...)
+	if v then
+		if v.m3_models then
+			return "computed"
+		else
+			return "data"
+		end
+	end
+	return false
 end
 
 -- TODO fhk lexer should support streaming

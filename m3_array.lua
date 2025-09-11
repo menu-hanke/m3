@@ -255,19 +255,30 @@ local function df_addcolsfunc(cols)
 		return function(df, cols, num)
 	]])
 	for i,c in ipairs(cols) do
-		buf:putf("local num%d = dim(cols.%s) or ", i, c.name)
-		if c.dummy then
-			buf:put("0\n")
-		else
-			buf:putf([[error("column without dummy must be given a value: `%s'") ]], c.name)
+		buf:putf("local num%d = dim(cols.%s)", i, c.name)
+		if c.dummy ~= nil then
+			buf:put(" or 0")
 		end
+		buf:put("\n")
 	end
 	buf:putf("if not num then num = max(")
-	for i=1, #cols do
+	for i,c in ipairs(cols) do
 		if i>1 then buf:put(",") end
 		buf:putf("num%d", i)
+		if c.dummy == nil then
+			buf:put(" or 0")
+		end
 	end
-	buf:put(") end if num == 0 then return end local base = df:alloc(num)\n")
+	buf:put(") end\nif num == 0 then return end local base = df:alloc(num)\n")
+	for i,c in ipairs(cols) do
+		if c.dummy == nil then
+			buf:putf(
+				[[if not num%d then error("column without dummy must be given a value: `%s'") end]],
+				i, c.name
+			)
+			buf:put("\n")
+		end
+	end
 	for i,c in ipairs(cols) do
 		buf:putf(
 			"copyext(df.%s+base, num, cols.%s, num%d, %s)\n",

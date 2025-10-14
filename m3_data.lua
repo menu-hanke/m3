@@ -203,6 +203,12 @@ local function databuf()
 	}, buf_mt)
 end
 
+-- query parameter
+local bind_mt = newmeta "bind"
+local function bind(name)
+	return setmetatable({name=name}, bind_mt)
+end
+
 -- TODO: use table dispatch here
 local function visit(o, f, ...)
 	local tag = gettag(o)
@@ -713,6 +719,7 @@ function map_obj.size(obj, tab, var)
 	end
 end
 
+-- TODO: if var has default and obj is never written to, then just alias it to the default.
 local function map_default(obj, var)
 	local default = var.m3_default
 	if not (default and default.m3_models) then return end
@@ -1183,6 +1190,12 @@ local function compiletransaction(tx, graph_instance)
 	ctx.nret = 0
 	-- query, if any, must happen before any masks are set, because it may create a new instance.
 	if tx.query then
+		local qparams = struct()
+		for _,a in ipairs(tx.actions) do
+			if gettag(a.output) == "bind" then
+				qparams.fields[a.output.name] = a.input
+			end
+		end
 		ctx.uv.query_exec = G[tx.query].exec
 		local ctype = G[tx.query].ctype
 		ctx.uv.query_ptrtype = ffi.typeof("$*", ctype)
@@ -1191,7 +1204,8 @@ local function compiletransaction(tx, graph_instance)
 		ctx.uv.mem_alloc = mem.alloc
 		ctx.query_field = tx.query_field
 		ctx.buf:putf(
-			"local Q = query_exec(graph_instance(), qparams, ffi_cast(query_ptrtype, mem_alloc(%d, %d)))\n",
+			"local Q = query_exec(graph_instance(), %s, ffi_cast(query_ptrtype, mem_alloc(%d, %d)))\n",
+			next(qparams.fields) and emitread(ctx, qparams) or "nil",
 			ffi.sizeof(ctype), ffi.alignof(ctype)
 		)
 	end
@@ -1219,10 +1233,14 @@ local function compiletransaction(tx, graph_instance)
 	end
 	local inputs = {}
 	for i,a in ipairs(tx.actions) do
-		inputs[i] = emitread(ctx, a.input)
+		if gettag(a.output) ~= "bind" then
+			inputs[i] = emitread(ctx, a.input)
+		end
 	end
 	for i,a in ipairs(tx.actions) do
-		emitwrite(ctx, a.output, inputs[i])
+		if gettag(a.output) ~= "bind" then
+			emitwrite(ctx, a.output, inputs[i])
+		end
 	end
 	local buf = buffer.new()
 	local uv = code.emitupvalues(ctx.uv, buf)
@@ -1232,10 +1250,6 @@ local function compiletransaction(tx, graph_instance)
 		for i=2, ctx.narg do
 			buf:putf(", arg%d", i)
 		end
-	end
-	if tx.query then
-		if ctx.narg > 0 then buf:put(",") end
-		buf:put("qparams")
 	end
 	buf:put(")\n")
 	buf:put(ctx.buf)
@@ -1518,20 +1532,11 @@ local function transaction_delete(transaction, a, b)
 	end)
 end
 
-local function transaction_define(transaction, src)
-	-- TODO(fhk): scoped define with query-vset variables
-	define(src)
-	return transaction
-end
-
-local function transaction_include(transaction, name)
-	-- TODO(fhk): see above
-	include(name)
-	return transaction
-end
-
 local function transaction_bind(transaction, name, value)
-	error("TODO(fhk): query-vset variables")
+	return transaction_action(transaction, {
+		input  = value,
+		output = bind(name)
+	})
 end
 
 local function transaction_read(transaction, ...)
@@ -1811,8 +1816,6 @@ local transaction_mt = {
 		update     = transaction_update,
 		insert     = transaction_insert,
 		delete     = transaction_delete,
-		define     = transaction_define,
-		include    = transaction_include,
 		bind       = transaction_bind,
 		read       = transaction_read,
 		write      = transaction_write,

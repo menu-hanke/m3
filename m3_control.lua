@@ -16,6 +16,11 @@ local function gettag(x)
 	return mt and mt["m3$ctag"]
 end
 
+local function getctr(x)
+	local mt = getmetatable(x)
+	return mt and mt.__m3_control and mt.__m3_control(x)
+end
+
 local function newmeta(tag)
 	return { ["m3$ctag"] = tag }
 end
@@ -40,6 +45,10 @@ local function tocontrol(x, tab_mt)
 		if istransaction(x) then
 			return setmetatable({f=x}, call_mt)
 		else
+			local ctr = getctr(x)
+			if ctr then
+				return tocontrol(ctr, tab_mt)
+			end
 			if not tab_mt then
 				error("plain table not allowed here - use `all' or `any' explicitly")
 			end

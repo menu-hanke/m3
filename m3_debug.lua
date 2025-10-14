@@ -15,8 +15,8 @@ local proccolor = {
 -- (assuming unbuffered stderr up to 4KB, ie. don't rely on it),
 -- so debug messages from workers don't get mixed up.
 local function trace(s)
-	local id = worker_id()
-	if id then
+	local id = M3_WORKER_ID
+	if M3_WORKER_ID then
 		if colorterm then
 			local c = id%(#proccolor+1)
 			s = string.format("[%s%d\x1b[0m] %s", proccolor[c], id, s)

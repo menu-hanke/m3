@@ -4,6 +4,10 @@ local db           = require "m3_db"
 local dbg          = require "m3_debug"
 local mem          = require "m3_mem"
 
+local function worker()
+	return M3_WORKER_ID or 0
+end
+
 _G.control = {
 	all            = control.all,
 	any            = control.any,
@@ -20,6 +24,7 @@ _G.control = {
 	delete         = mem.delete,
 	load           = mem.load,
 	save           = mem.save,
+	worker         = worker
 }
 
 _G.data = {
@@ -39,7 +44,3 @@ _G.data = {
 
 _G.pprint          = dbg.pprint
 _G.pretty          = dbg.pretty
-
-function _G.worker_id()
-	return M3_WORKER_ID or 0
-end

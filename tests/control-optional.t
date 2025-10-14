@@ -2,7 +2,7 @@
 
 local ct = require "controltest"
 
-local state = data.cdata { ctype="struct { uint32_t bit; uint32_t value; }" }
+local state = data.cdata("struct { uint32_t bit; uint32_t value; }")
 local toggle = data.transaction():mutate(state, function(s) s.value = s.value+2^s.bit end)
 local nextbit = data.transaction():mutate(state, function(s) s.bit = s.bit+1 end)
 local getstate = data.transaction():read(state)

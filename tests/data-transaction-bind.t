@@ -1,6 +1,6 @@
 -- vim: ft=lua
 
-local slot = data.cdata { ctype="int32_t" }
+local slot = data.cdata("int32_t")
 
 local setslot = data.transaction():write(slot)
 

@@ -1,4 +1,4 @@
-local current = data.cdata { ctype = "int32_t", init = 1 }
+local current = data.cdata("int32_t", 1)
 local nodes = { {[0]="(root)"} }
 
 local putnode = data.transaction()

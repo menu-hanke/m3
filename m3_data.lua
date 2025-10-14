@@ -84,8 +84,14 @@ end
 
 -- static memory slot
 local memslot_mt = newmeta "memslot"
-local function memslot(slot)
-	return setmetatable(slot or {}, memslot_mt)
+local function memslot(x,v)
+	local slot
+	if type(x) == "table" then
+		slot = x
+	else
+		slot = {ctype=x, init=v}
+	end
+	return setmetatable(slot, memslot_mt)
 end
 
 -- collection of named objects
@@ -199,7 +205,7 @@ end
 local buf_mt = newmeta "buf"
 local function databuf()
 	return setmetatable({
-		tail = memslot { ctype="int32_t", init=0 },
+		tail = memslot("int32_t", 0)
 	}, buf_mt)
 end
 
@@ -276,7 +282,7 @@ local function describe(d)
 	return tostring(buf)
 end
 
-D.G_state = memslot { ctype = "struct { void *instance; uint64_t mask; }", init = false }
+D.G_state = memslot("struct { void *instance; uint64_t mask; }")
 D.actions = databuf()
 
 ---- Dataflow ------------------------------------------------------------------

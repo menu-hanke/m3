@@ -282,7 +282,7 @@ local function describe(d)
 	return tostring(buf)
 end
 
-D.G_state = memslot("struct { void *instance; uint64_t mask; }")
+D.G_state = memslot("struct { uint8_t *instance; uint64_t mask; }")
 D.actions = databuf()
 
 ---- Dataflow ------------------------------------------------------------------

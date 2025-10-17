@@ -420,10 +420,9 @@ local function fork_new(L,p)
 			-- constified.
 			local fid = env_func(L, [[
 local C = require "m3_C"
-local db = require "m3_db"
 local buffer = require "string.buffer"
 local ffi = require "ffi"
-local eval, disconnect, ffi_cast, ffi_copy, xpcall, traceback = m3.eval, db.disconnect, ffi.cast, ffi.copy, xpcall, debug.traceback
+local eval, ffi_cast, ffi_copy, xpcall, traceback = m3.eval, ffi.cast, ffi.copy, xpcall, debug.traceback
 local pid, heap, main2work, work2main, exit_event = ...
 _G.M3_WORKER_ID = pid
 
@@ -484,7 +483,7 @@ return function()
 			C.m3_mp_proc_park(proc)
 		end
 	end
-	disconnect(false)
+	if _m3_shutdown then _m3_shutdown() end
 end
 			]],
 			i,

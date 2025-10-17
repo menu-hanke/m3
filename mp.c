@@ -402,14 +402,14 @@ CFUNC void m3_mp_event_set(m3_Event *event, uint32_t flag)
 // http://www.1024cores.net/home/lock-free-algorithms/queues/bounded-mpmc-queue
 struct m3_Queue {
 	struct {
-		uint64_t read;
-		uint64_t rmask;
+		uint64_t read;         // read pointer (next read)
+		uint64_t rmask;        // queue size - 1
 		m3_Future *wfut;
 		m3_Mutex wfut_lock;
 	} __attribute__((aligned(M3_CACHELINE_SIZE)));
 	struct {
-		uint64_t write;
-		uint64_t wmask;
+		uint64_t write;        // write pointer (next write)
+		uint64_t wmask;        // queue size - 1
 		m3_Future *rfut;
 		m3_Mutex rfut_lock;
 	} __attribute__((aligned(M3_CACHELINE_SIZE)));
@@ -444,10 +444,11 @@ again:
 		uint64_t idx = write & mask;
 		uint64_t stamp = __atomic_load_n(&queue->slots[idx].stamp, __ATOMIC_ACQUIRE);
 		if (LIKELY(stamp == write)) {
-			assert(queue->read <= write);
 			// reader is done, this slot is free, attempt to write.
 			if (__atomic_compare_exchange_n(&queue->write, &write, write+1, 1,
 					__ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+				// no read can proceed past this slot until we complete the write
+				assert(__atomic_load_n(&queue->read, __ATOMIC_RELAXED)  <= write);
 				// we may proceed to write
 				fut->state = FUT_COMPLETED;
 				// is a read waiting to be completed?
@@ -546,7 +547,8 @@ again:
 		uint64_t idx = read & mask;
 		uint64_t stamp = __atomic_load_n(&queue->slots[idx].stamp, __ATOMIC_ACQUIRE);
 		if (LIKELY(stamp == read+1)) {
-			assert(read < queue->write);
+			// we cannot read past the write pointer
+			assert(read < __atomic_load_n(&queue->write, __ATOMIC_RELAXED));
 			if (__atomic_compare_exchange_n(&queue->read, &read, read+1, 1,
 					__ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
 				// we may proceed to read

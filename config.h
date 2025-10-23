@@ -13,17 +13,17 @@
 // virtual memory is committed lazily, so you can put a huge number here.
 #define M3_MP_PROC_MEMORY              0x100000000ull
 
-// minimum work memory block size.
-// the actual block size is the smallest integer multiple of this number that makes the whole
-// work memory fit into 64 blocks.
-// this should be a reasonably small multiple of cache line size (eg. <1024)
-// increasing this makes each savepoint write do more work, but results in fewer writes overall.
-#define M3_MEM_BLOCKSIZE_MIN           M3_CACHELINE_SIZE
+// size of (all but last) work blocks.
+// this should be chosen to balance the copying overhead per save/load, and the
+// frequency of m3_mem_write() calls from lua.
+// an aligned copy of the default 512 bytes takes 8 cycles on zen 5, or 16 on zen 4 and earlier.
+// smaller or larger values might work better depending on your specific workload and cpu.
+// in practice, you're unlikely to notice any difference unless
+// (a) you're creating hundreds of millions of savepoints per second; or
+// (b) your work memory size overflows 64 blocks (64*512 = 32KB, or 4K double/pointer variables)
+// #define M3_CONFIG_BLOCKSIZE            512
+#define M3_CONFIG_BLOCKSIZE            64
 
-// minimum memory chunk size.
-// increasing this may save some allocations, but also may increase memory usage.
-// this should be a multiple of page size.
-#define M3_MEM_CHUNKSIZE_MIN           M3_PAGE_SIZE
-
-// attempt to free unused chunks every `n` allocations
-#define M3_MEM_SWEEP_INTERVAL          10
+// size of initial frame memory chunk.
+// this should be a multiple of page size, otherwise you waste some memory.
+#define M3_CONFIG_CHUNKSIZE            M3_PAGE_SIZE

@@ -13,7 +13,7 @@ require "table.clear"
 
 local load = code.load
 local event, enabled = dbg.event, dbg.enabled
-local mem_getobj = mem.getobj
+local mem_getobj, mem_state = mem.getobj, mem.state()
 
 local G = fhk.newgraph()
 
@@ -528,8 +528,7 @@ local function worklayout(slots)
 		slot.ofs = ptr
 		ptr = ptr + ffi.sizeof(slot.ctype)
 	end
-	local work, bsize = mem.work_init(ptr)
-	D.bsize = bsize
+	local work = mem.createworkspace(ptr)
 	for _, slot in ipairs(slots) do
 		slot.ptr = ffi.cast(
 			ffi.typeof("$*", slot.ctype),
@@ -828,8 +827,8 @@ local function compilegraph(alloc)
 	G = assert(G:compile())
 	readresetmasks()
 	-- pre-create instance so that instance creation can assume we always have a non-null instance
-	-- available
-	D.G_state.ptr.instance = G:instance(alloc, mem.state)
+	-- available. use global allocator here, but frame allocator in new instances.
+	D.G_state.ptr.instance = G:instance(alloc, mem_state.alloc)
 	D.G_state.ptr.mask = 0
 end
 
@@ -1172,9 +1171,7 @@ local function cdatamask(ofs, size)
 	if type(ofs) == "table" then
 		ofs, size = ofs.ofs, ffi.sizeof(ofs.ctype)
 	end
-	local first = math.floor(ofs / D.bsize)
-	local last = math.floor((ofs+size-1) / D.bsize)
-	return bit.lshift(1ull, last+1) - bit.lshift(1ull, first)
+	return mem.ofs2mask(ofs, size)
 end
 
 local function visit_mmask(o, ctx)
@@ -1270,26 +1267,26 @@ local function compiletransaction(tx, graph_instance)
 	return load(buf, code.chunkname(string.format("transaction %p", tx)))(unpack(uv))
 end
 
--- TODO: this should take a query mask parameter and only create a new instance if the intersection
--- is nonzero
+-- TODO: this should take a query mask parameter and only create a new instance if the
+-- intersection is nonzero
 local function graph_instancefunc(alloc)
 	return load(string.format([[
 		local state, G, alloc, memstate, write, iswritable = ...
 		return function()
+			if state.mask == 0 then
+				return state.instance
+			end
 			if not iswritable(state.instance) then
 				write(0x%xull)
 				goto new
 			end
-			if state.mask == 0 then
-				return state.instance
-			end
 			::new::
-			local instance = G:instance(alloc, memstate, state.instance, state.mask)
+			local instance = G:instance(alloc, memstate.framealloc, state.instance, state.mask)
 			state.instance = instance
 			state.mask = 0
 			return instance
 		end
-	]], cdatamask(D.G_state)))(D.G_state.ptr, G, alloc, mem.state, mem.write,
+	]], cdatamask(D.G_state)))(D.G_state.ptr, G, alloc, mem_state, mem.write,
 		mem.iswritable)
 end
 
@@ -1354,17 +1351,18 @@ local function traceobjs()
 	return objs
 end
 
-local function trace_alloc(_, size, align)
-	local ptr = C.m3_mem_alloc(mem.state, size, align)
-	event("alloc", tonumber(size), tonumber(align), ptr)
+local function trace_alloc(alloc, size, align)
+	local ptr = C.m3_mem_allocx(alloc, size, align)
+	event("alloc", alloc, tonumber(size), tonumber(align), ptr)
 	return ptr
 end
 
 local function init()
 	dataflow()
 	memlayout()
-	local alloc = enabled("alloc") and ffi.cast("void *(*)(void *, size_t, size_t)", trace_alloc)
-		or C.m3_mem_alloc
+	local alloc = enabled("alloc")
+		and ffi.cast("void *(*)(void *, size_t, size_t)", trace_alloc)
+		or C.m3_mem_allocx
 	compilegraph(alloc)
 	if enabled("data") then
 		event("data", traceobjs())

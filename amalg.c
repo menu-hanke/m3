@@ -27,7 +27,7 @@ LDEF(function _.check(x) if x ~= 0 then error(global_err.ep ~= nil and ffi.strin
 #include "config.h"
 
 LDEF(_.CONFIG_MP_PROC_MEMORY = M3_MP_PROC_MEMORY)
-LDEF(_.CONFIG_MEM_BLOCKSIZE_MIN = M3_MEM_BLOCKSIZE_MIN)
+LDEF(_.CONFIG_BLOCKSIZE = M3_CONFIG_BLOCKSIZE)
 LDEF(_.TARGET_CACHELINE_SIZE = M3_CACHELINE_SIZE)
 
 #endif

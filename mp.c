@@ -84,8 +84,9 @@ CDEF typedef struct m3_Proc {
 } m3_Proc;
 
 CDEF typedef struct m3_ProcPrivate {
-	m3_Heap heap;  // this proc's shared memory heap
-	m3_Vec msg;    // [m3_Message *] all messages ever allocated by this proc
+	m3_Heap heap;     // this proc's shared memory heap
+	m3_Message **msg; // all messages ever allocated by this proc
+	uint32_t nmsg, sizemsg;
 } m3_ProcPrivate;
 
 /* ---- Shared memory layout ------------------------------------------------ */
@@ -303,8 +304,8 @@ CFUNC void *m3_mp_heap_alloc(m3_Heap *heap, size_t size)
 
 static void mp_proc_sweep(m3_ProcPrivate *pp)
 {
-	m3_Message **messages = pp->msg.data;
-	size_t nmes = pp->msg.len / sizeof(*messages);
+	m3_Message **messages = pp->msg;
+	size_t nmes = pp->nmsg;
 	size_t i = 0;
 	while (i < nmes) {
 		m3_Message *mes = messages[i];
@@ -315,7 +316,7 @@ static void mp_proc_sweep(m3_ProcPrivate *pp)
 			i++;
 		}
 	}
-	pp->msg.len = i * sizeof(*messages);
+	pp->nmsg = i;
 }
 
 CFUNC m3_Message *m3_mp_proc_alloc_message(m3_ProcPrivate *pp, uint16_t chan, size_t size)
@@ -329,7 +330,9 @@ CFUNC m3_Message *m3_mp_proc_alloc_message(m3_ProcPrivate *pp, uint16_t chan, si
 		if (UNLIKELY(!msg))
 			msg = mp_heap_bump_cls(&pp->heap, size);
 	}
-	*mem_vec_allocT(&pp->msg, m3_Message *) = msg;
+	if (UNLIKELY(pp->nmsg >= pp->sizemsg))
+		m3_mem_growvec(pp->msg, pp->sizemsg, 0);
+	pp->msg[pp->nmsg++] = msg;
 	msg->state = MSG_REF;
 	msg->len = len;
 	msg->cls = size;

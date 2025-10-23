@@ -1,18 +1,13 @@
 #include "config.h"
-#include "def.h"
-#include "err.h"
 #include "mem.h"
-#include "target.h"
 
 #include <assert.h>
-#include <stdalign.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdlib.h>
 
-#define MEM_VECSIZE0 16
-#define FRAME_OBJS   1
-#define FRAME_ALIVE  2
-#define FRAME_CHILD  4
+#define FRAME_ACTIVE   1
+#define FRAME_ALIVE    2
+#define FRAME_CHILD    4
 
 typedef struct ChunkMetadata {
 	struct ChunkMetadata *prev;
@@ -20,27 +15,6 @@ typedef struct ChunkMetadata {
 } ChunkMetadata;
 
 #define chunk_base(meta) ((void *)(meta) + sizeof(ChunkMetadata) - (meta)->size)
-
-static void *mem_vec_grow(m3_Vec *vec, uint32_t size)
-{
-	uint32_t cap = vec->cap;
-	if (!cap) cap = MEM_VECSIZE0;
-	while (cap < vec->len+size) cap <<= 1;
-	vec->data = vec->cap ? realloc(vec->data, cap) : malloc(cap);
-	vec->cap = cap;
-	void *ptr = vec->data + vec->len;
-	vec->len += size;
-	return ptr;
-}
-
-void *m3_mem_vec_alloc(m3_Vec *vec, uint32_t size)
-{
-	if (UNLIKELY(vec->len+size > vec->cap))
-		return mem_vec_grow(vec, size);
-	void *ptr = vec->data + vec->len;
-	vec->len += size;
-	return ptr;
-}
 
 #if M3_MMAP
 
@@ -101,339 +75,307 @@ static void mem_chunk_unmap(ChunkMetadata *meta)
 
 #endif
 
-static void mem_chunk_unmap_chain(ChunkMetadata *meta)
+static void *mem_alloc_grow(m3_Err *err, m3_Alloc *alloc, size_t size, size_t align)
 {
-	while (meta) {
-		ChunkMetadata *prev = meta->prev;
-		mem_chunk_unmap(meta);
-		meta = prev;
-	}
-}
-
-static void mem_chunk_sweep(m3_Mem *mem)
-{
-	(void)mem;
-	// TODO: check every frame, dead frames can be swept immediately, for non-dead frames put
-	// non-primary chunks in a work list and store current frame->chunk, these can be freed
-	// when frame->chunk changes.
-}
-
-NOINLINE
-CFUNC int m3_mem_chunk_new(m3_Mem *mem, uint32_t need)
-{
-	if (UNLIKELY(!mem->sweep)) {
-		mem_chunk_sweep(mem);
-		mem->sweep = M3_MEM_SWEEP_INTERVAL;
-	} else {
-		mem->sweep--;
-	}
-	ChunkMetadata *prev = mem->chunk ? (mem->chunk+mem->chunktop) : NULL;
-	size_t size = prev ? (prev->size<<1) : M3_MEM_CHUNKSIZE_MIN;
-	while (size < need+sizeof(ChunkMetadata))
-		size <<= 1;
-	int err;
-	if (UNLIKELY((err = mem_chunk_map(mem->err, &mem->chunk, size))))
-		return err;
-	mem->chunktop = size - sizeof(ChunkMetadata);
-	mem->cursor = mem->chunktop;
-	ChunkMetadata *meta = mem->chunk + mem->chunktop;
+	ChunkMetadata *prev = alloc->chunk ? (alloc->chunk+alloc->chunktop) : NULL;
+	size_t chunksize = prev ? (prev->size<<1) : M3_CONFIG_CHUNKSIZE;
+	while (chunksize < size+sizeof(ChunkMetadata))
+		chunksize <<= 1;
+	if (UNLIKELY(mem_chunk_map(err, &alloc->chunk, chunksize)))
+		return NULL;
+	size_t cursor = chunksize - sizeof(ChunkMetadata);
+	alloc->chunktop = cursor;
+	cursor -= size;
+	cursor &= -align;
+	alloc->cursor = cursor;
+	alloc->needsweep = 1;
+	ChunkMetadata *meta = alloc->chunk + alloc->chunktop;
 	meta->prev = prev;
-	meta->size = size;
-	return 0;
+	meta->size = chunksize;
+	return alloc->chunk + cursor;
 }
 
-CFUNC void *m3_mem_alloc(m3_Mem *mem, size_t size, size_t align)
+void *m3_mem_alloc(m3_Err *err, m3_Alloc *alloc, size_t size, size_t align)
 {
-	if (UNLIKELY(size > mem->cursor)) {
-		if (UNLIKELY(m3_mem_chunk_new(mem, size)))
-			return NULL;
+	if (LIKELY(size < alloc->cursor)) {
+		alloc->cursor -= size;
+		alloc->cursor &= -align;
+		return alloc->chunk + alloc->cursor;
 	}
-	mem->cursor -= size;
-	mem->cursor &= -align;
-	return mem->chunk + mem->cursor;
+	return mem_alloc_grow(err, alloc, size, align);
 }
 
-int m3_mem_alloc_bump(m3_Mem *mem, uint32_t size)
+// for fhk custom allocator callback
+void *m3_mem_allocx(m3_Alloc *alloc, size_t size, size_t align)
 {
-	if (UNLIKELY(size > mem->cursor)) {
-		int err;
-		if (UNLIKELY((err = m3_mem_chunk_new(mem, size))))
-			return err;
+	return m3_mem_alloc(NULL, alloc, size, align);
+}
+
+#define mem_alloclist(e,a,p,n) (p = m3_mem_alloc((e), (a), (n)*sizeof(*(p)), alignof(*(p))))
+
+void *m3_mem_tmp(m3_Mem *mem, size_t size)
+{
+	if (UNLIKELY(mem->curtmp+size >= mem->sizetmp))
+		m3_mem_growvec(mem->tmp, mem->sizetmp, mem->curtmp+size);
+	void *p = mem->tmp + mem->curtmp;
+	mem->curtmp += size;
+	return p;
+}
+
+static void mem_alloc_sweep(m3_Alloc *alloc)
+{
+	if (!alloc->chunk)
+		return;
+	ChunkMetadata *meta = alloc->chunk + alloc->chunktop;
+	ChunkMetadata *m = meta->prev;
+	meta->prev = NULL;
+	while (m) {
+		ChunkMetadata *prev = m->prev;
+		mem_chunk_unmap(m);
+		m = prev;
 	}
-	mem->cursor -= size;
-	return 0;
 }
 
-static void mem_ftab_grow(m3_Mem *mem)
+static void mem_alloc_destroy(m3_Alloc *alloc)
 {
-	FrameId maxframe = mem->maxframe ? (mem->maxframe<<1) : MEM_VECSIZE0;
-	mem->ftab = realloc(mem->ftab, maxframe*sizeof(*mem->ftab));
-	memset(mem->ftab + mem->maxframe, 0, (maxframe-mem->maxframe)*sizeof(*mem->ftab));
-	mem->fblock = realloc(mem->fblock, maxframe*mem->wnum*sizeof(*mem->fblock));
-	mem->fobj = realloc(mem->fobj, maxframe*sizeof(*mem->fobj));
-	void *fwork0 = malloc(maxframe*mem->wnum*mem->bsize + M3_CACHELINE_SIZE-1);
-	void *fwork = (void *) (((intptr_t)fwork0 + M3_CACHELINE_SIZE-1) & -M3_CACHELINE_SIZE);
-	if (mem->fwork)
-		memcpy(fwork, mem->fwork, mem->maxframe*mem->wnum*mem->bsize);
-	free(mem->fwork0);
-	mem->fwork0 = fwork0;
-	mem->fwork = fwork;
-	mem->maxframe = maxframe;
+	mem_alloc_sweep(alloc);
+	if (alloc->chunk)
+		mem_chunk_unmap((ChunkMetadata *) (alloc->chunk + alloc->chunktop));
 }
 
-static void mem_assert_fresh_frame_invariants(m3_Mem *mem)
+static void mem_alloc_init(m3_Alloc *alloc)
 {
-	(void)mem;
-	assert(mem->unsaved == ~mem->ftab[mem->frame].save);
-	assert((uint32_t)mem->lfreen == mem->lfree.len);
-	assert(mem->cursor == mem->chunktop);
-	assert(mem->diff == 0);
+	memset(alloc, 0, sizeof(*alloc));
 }
 
-static void mem_save_objlist(m3_Mem *mem, size_t fp)
+static m3_Alloc *mem_alloc_new(m3_Mem *mem)
 {
-	ObjList *old = mem->fobj[fp];
-	size_t lfree0 = mem->lfreen;
-	size_t lfreen = mem->lfree.len;
-	if (lfree0 < lfreen) {
-		size_t size = lfreen - lfree0;
-		mem->lfree.len = lfree0;
-		// this alloc could technically fail, and if it does, just ignore it.
-		// the worst that can happen is we just leak more memory (the object ids).
-		ObjList *objs = m3_mem_alloc(mem, sizeof(*objs)+size, alignof(*objs));
-		if (LIKELY(objs)) {
-			mem->fobj[fp] = objs;
-			objs->size = size;
-			memcpy(&objs->id, mem->lfree.data+lfree0, size);
-		}
-	}
-	if (mem->ftab[fp].state) {
-		assert(mem->ftab[fp].state == FRAME_OBJS);
-		void *dest = m3_mem_vec_alloc(&mem->lfree, old->size);
-		mem->lfreen = mem->lfree.len;
-		memcpy(dest, &old->id, old->size);
-	}
+	m3_Alloc *alloc = m3_mem_alloc(mem->err, &mem->alloc, sizeof(*alloc), alignof(*alloc));
+	mem_alloc_init(alloc);
+	return alloc;
+}
+
+void *m3_mem_grow(void *p, size_t *sz, size_t esz, size_t need)
+{
+	size_t s = *sz;
+	s = s ? (s<<1) : 16;
+	while (s < need)
+		s <<= 1;
+	*sz = s;
+	return realloc(p, s*esz);
+}
+
+static void mem_grow_ftab(m3_Mem *mem)
+{
+	FrameId sizeftab = mem->sizeftab ? (mem->sizeftab<<1) : 8;
+	mem->ftab = realloc(mem->ftab, sizeftab*sizeof(*mem->ftab));
+	memset(mem->ftab+mem->sizeftab, 0, (sizeftab-mem->sizeftab)*sizeof(*mem->ftab));
+	for (size_t i=mem->sizeftab; i<sizeftab; i++)
+		mem->ftab[i].alloc = mem_alloc_new(mem);
+	void *fsave_base = malloc(sizeftab*mem->sizework + M3_CACHELINE_SIZE-1);
+	void *fsave = (void *) (((intptr_t)fsave_base + M3_CACHELINE_SIZE-1) & -M3_CACHELINE_SIZE);
+	memcpy(fsave, mem->fsave, mem->sizeftab*mem->sizework);
+	free(mem->fsave_base);
+	mem->fsave_base = fsave_base;
+	mem->fsave = fsave;
+	mem->sizeftab = sizeftab;
 }
 
 CFUNC int m3_mem_save(m3_Mem *mem)
 {
-	if (UNLIKELY(!(mem->ftab[mem->frame].state & FRAME_ALIVE)))
-		return -1;
-	size_t id = mem->frame+1;
-	FrameState newstate = (uint32_t)mem->lfreen < mem->lfree.len;
-	for (;;id++) {
-		FrameState state;
-		if (UNLIKELY(id >= mem->maxframe)) {
-			mem_ftab_grow(mem);
-			state = 0;
-			goto found;
-		}
-		state = mem->ftab[id].state;
-		if (LIKELY(state < FRAME_ALIVE)) {
-found:
-			if (UNLIKELY(state|newstate))
-				mem_save_objlist(mem, id);
+	// find a free child frame id. invariant: child id > parent id
+	size_t id = mem->parent + 1;
+	mem->ftab[mem->parent].state += FRAME_CHILD;
+	for (;; id++) {
+		// need to grow?
+		if (UNLIKELY(id >= mem->sizeftab)) {
+			mem_grow_ftab(mem);
 			break;
 		}
+		// find a free frame?
+		if (LIKELY(!mem->ftab[id].state))
+			break;
 	}
-	FrameId prev = mem->frame;
-	mem->ftab[prev].state += FRAME_CHILD;
+	// commit new frame
 	m3_Frame *frame = &mem->ftab[id];
-	void *chunk = frame->chunk;
-	uint32_t chunktop = frame->chunktop;
-	frame->state = FRAME_ALIVE | newstate;
-	frame->chunk = mem->chunk;
-	frame->chunktop = mem->chunktop;
 	frame->diff = mem->diff;
-	frame->prev = prev;
 	frame->save = 0;
-	mem->chunk = chunk;
-	mem->chunktop = chunktop;
-	mem->cursor = chunktop;
-	mem->frame = id;
+	frame->parent = mem->parent;
+	frame->state = FRAME_ACTIVE | FRAME_ALIVE;
+	// swap allocators
+	m3_Alloc *alloc = frame->alloc;
+	frame->alloc = mem->framealloc;
+	mem->framealloc = alloc;
+	// commit pending object handles and return old object handles to free pool
+	if (UNLIKELY(frame->nobj || (mem->nfreeobj != mem->framefreeobj))) {
+		size_t nobj = mem->framefreeobj - mem->nfreeobj;
+		size_t fnobj = frame->nobj;
+		ObjId *fobjref = frame->objref;
+		frame->nobj = nobj;
+		if (nobj) {
+			mem_alloclist(mem->err, frame->alloc, frame->objref, nobj);
+			memcpy(frame->objref, mem->freeobj+mem->nfreeobj, nobj*sizeof(*frame->objref));
+		}
+		if (fnobj) {
+			if (UNLIKELY(mem->nfreeobj+fnobj >= mem->sizefreeobj))
+				m3_mem_growvec(mem->freeobj, mem->sizefreeobj, mem->nfreeobj+fnobj);
+			memcpy(mem->freeobj+mem->nfreeobj, fobjref, fnobj*sizeof(*fobjref));
+			mem->nfreeobj += fnobj;
+		}
+		mem->framefreeobj = mem->nfreeobj;
+	}
+	// reset pending frame
+	mem->parent = id;
 	mem->diff = 0;
 	mem->unsaved = ~0ULL;
-	// TODO: should this eagerly copy (save & ~diff) from previous frame?
-	// this would reduce calls to m3_mem_write() with the expense of an extra loop here
-	mem_assert_fresh_frame_invariants(mem);
+	alloc->cursor = alloc->chunktop;
+	if (UNLIKELY(alloc->needsweep))
+		mem_alloc_sweep(alloc);
 	return id;
 }
 
-AINLINE static void mem_copyblock(void *dst, void *src, size_t bsize)
+static void mem_copyblocks(void *dst, void *src, BlockMask mask, size_t sizewmem)
 {
-	assert(!((intptr_t)dst & (M3_CACHELINE_SIZE-1)));
-	assert(!((intptr_t)src & (M3_CACHELINE_SIZE-1)));
-	struct __attribute__((aligned(M3_CACHELINE_SIZE))) {
-		uint8_t _[M3_MEM_BLOCKSIZE_MIN];
-	} *d = dst, *s = src;
-	size_t n = 0;
-	for (;;) {
-		*d++ = *s++;
-		n += M3_MEM_BLOCKSIZE_MIN;
-		if (n >= bsize) break;
+	if (UNLIKELY((int64_t)mask < 0)) {
+		// copy tail
+		assert(sizewmem > 63*M3_CONFIG_BLOCKSIZE);
+		memcpy(dst + 63*M3_CONFIG_BLOCKSIZE, src + 63*M3_CONFIG_BLOCKSIZE,
+			sizewmem - 63*M3_CONFIG_BLOCKSIZE);
+		mask &= ~(1ULL << 63);
+	}
+	for (; mask; mask &= mask-1) {
+		size_t i = __builtin_ctzll(mask);
+		memcpy(dst + i*M3_CONFIG_BLOCKSIZE, src + i*M3_CONFIG_BLOCKSIZE, M3_CONFIG_BLOCKSIZE);
 	}
 }
 
-AINLINE static void mem_restore(m3_Mem *mem, FrameId *bfp, Mask mask)
+static void mem_load_walk(m3_Mem *mem, FrameId fp)
 {
-	size_t bsize = mem->bsize;
+	assert(mem->curtmp == 0);
+	m3_Frame *ftab = mem->ftab;
+	void *fsave = mem->fsave;
+	size_t frame = mem->parent;
+	BlockMask restore = mem->diff;
+	size_t sizework = mem->sizework;
 	void *work = mem->work;
-	size_t wsize = mem->wnum*bsize;
-	void *fwork = mem->fwork;
-	for (; mask; mask&=mask-1) {
-		size_t idx = __builtin_ctzll(mask);
-		assert(mem->ftab[bfp[idx]].save & (1 << idx));
-		size_t ofs = idx*bsize;
-		mem_copyblock(work + ofs, fwork + bfp[idx]*wsize + ofs, bsize);
-	}
-}
-
-static void mem_copyframeptr(FrameId *dest, FrameId *src, Mask mask)
-{
-	for (; mask; mask&=mask-1) {
-		size_t idx = __builtin_ctzll(mask);
-		dest[idx] = src[idx];
-	}
-}
-
-static void mem_frame_store(m3_Mem *mem, FrameId fp, Mask mask)
-{
-	m3_Frame *ftab = mem->ftab;
-	assert(mask && !(mask & ftab[fp].save));
-	ftab[fp].save |= mask;
-	Mask diff = mask & ftab[fp].diff;
-	size_t wnum = mem->wnum;
-	FrameId *fblock = mem->fblock + wnum*fp;
-	// maintain invariant: (child.save ∪  child.diff) ⊂  parent.save,
-	// however, we *don't* maintain child.diff ⊂  child.save here. that is done in the slow path
-	// of m3_mem_load.
-	// for each block `b` in `mask`, we have two cases:
-	//   (1) b ∈ diff: by the invariant, we have b ∈ parent.save, so we create a new copy in this
-	//       frame
-	//   (2) b ∉ diff: we don't know if b ∈ parent.save, but we haven't modified b, so we ensure
-	//       a copy exists in the parent frame, and copy the pointer
-	if (diff) {
-		size_t bsize = mem->bsize;
-		void *fwork = mem->fwork + wnum*fp*bsize;
-		void *work = mem->work;
-		for (Mask m=diff; m; m&=m-1) {
-			size_t idx = __builtin_ctzll(m);
-			fblock[idx] = fp;
-			size_t ofs = idx*bsize;
-			mem_copyblock(fwork + ofs, work + ofs, bsize);
-		}
-		if (mask == diff)
-			return;
-		mask &= ~diff;
-	}
-	FrameId fp1 = ftab[fp].prev;
-	Mask propagate = mask & ~ftab[fp1].save;
-	if (UNLIKELY(propagate))
-		mem_frame_store(mem, fp1, propagate);
-	mem_copyframeptr(fblock, fblock + (fp1-fp)*wnum, mask);
-}
-
-CFUNC void m3_mem_write(m3_Mem *mem, Mask mask)
-{
-	Mask unsaved = mem->unsaved;
-	assert(unsaved == ~mem->ftab[mem->frame].save);
-	mem->unsaved &= ~mask;
-	mem_frame_store(mem, mem->frame, mask & unsaved);
-}
-
-static void mem_load_slow(m3_Mem *mem, size_t fp)
-{
-	assert(mem->scratch.len == 0);
-	size_t frame = mem->frame;
-	mem->frame = fp;
-	m3_Frame *ftab = mem->ftab;
-	Mask restore = mem->diff;
-	FrameId bfp[64];
-	size_t r = 0;
+	mem->parent = fp;
 	mem->unsaved = ~ftab[fp].save;
+	size_t curtmp = 0;
 	for (;;) {
 		if (frame > fp) {
-			Mask diff = ftab[frame].diff;
+			// walk up from source frame
+			m3_Frame *f = &ftab[frame];
+			assert(f->state & FRAME_ACTIVE);
+			f->state &= ~FRAME_ACTIVE;
+			BlockMask diff = f->diff;
 			restore |= diff;
-			if (UNLIKELY(ftab[frame].state & FRAME_ALIVE)) {
-				Mask need = diff & ~ftab[frame].save;
-				if (UNLIKELY(need))
-					mem_frame_store(mem, frame, need);
+			// did we walk past a frame we may later return to?
+			if (UNLIKELY(f->state)) {
+				// then ensure it saves its own diff.
+				// no propagation needed here because the invariant child.diff ⊂ parent.save
+				// guarantees that what we save here is already saved in the parent
+				assert((diff & ftab[f->parent].save) == diff);
+				BlockMask need = diff & ~f->save;
+				if (UNLIKELY(need)) {
+					f->save |= need;
+					mem_copyblocks(fsave + frame*sizework, work, need, sizework);
+				}
 			}
-			frame = ftab[frame].prev;
-		} else if (fp > frame) {
-			*mem_vec_allocT(&mem->scratch, FrameId) = fp;
-			fp = ftab[fp].prev;
-			r++;
+			frame = f->parent;
+		} else if (UNLIKELY(fp > frame)) {
+			// walk up from target frame (slow path: target is not an ancestor of source)
+			if (UNLIKELY(curtmp+sizeof(FrameId) >= mem->sizetmp))
+				m3_mem_growvec(mem->tmp, mem->sizetmp, curtmp+sizeof(FrameId));
+			*(FrameId *)(mem->tmp + curtmp) = fp;
+			curtmp += sizeof(FrameId);
+			fp = ftab[fp].parent;
 		} else {
 			break;
 		}
 	}
-	FrameId *fblock = mem->fblock;
-	size_t wnum = mem->wnum;
-	mem_copyframeptr(bfp, fblock + wnum*frame, restore);
-	if (r > 0) {
-		mem->scratch.len = 0;
-		FrameId *right = mem->scratch.data;
+	// rollback to common ancestor
+	mem_copyblocks(work, fsave + frame*sizework, restore, sizework);
+	// if target was not an ancestor, apply the other branch in reverse order
+	if (UNLIKELY(curtmp)) {
+		FrameId *base = mem->tmp;
+		FrameId *fid = mem->tmp + curtmp;
 		do {
-			FrameId f = right[r];
-			Mask diff = ftab[f].diff;
-			restore |= diff;
-			mem_copyframeptr(bfp, fblock + wnum*f, diff);
-		} while (r-- > 0);
+			FrameId fi = *--fid;
+			m3_Frame *f = &ftab[fi];
+			assert(!(f->state & FRAME_ACTIVE));
+			f->state |= FRAME_ACTIVE;
+			mem_copyblocks(mem->work, fsave + fi*sizework, f->diff, sizework);
+		} while (fid > base);
 	}
-	mem_restore(mem, bfp, restore);
 }
 
-CFUNC void m3_mem_load(m3_Mem *mem, int fpx)
+CFUNC void m3_mem_load(m3_Mem *mem, FrameId fp)
 {
-	size_t fp = fpx;
-	assert(mem->ftab[fp].state & FRAME_ALIVE);
-	if (LIKELY(fp == mem->frame)) {
-		mem_restore(mem, mem->fblock + mem->wnum*fp, mem->diff);
+	assert((mem->diff & mem->unsaved) == 0);
+	if (LIKELY(fp == mem->parent)) {
+		// reset pending frame
+		mem_copyblocks(mem->work, mem->fsave + fp*mem->sizework, mem->diff, mem->sizework);
 	} else {
-		mem_load_slow(mem, fp);
+		// walk the savepoint tree to the target frame
+		mem_load_walk(mem, fp);
 	}
-	mem->cursor = mem->chunktop;
-	mem->lfreen = mem->lfree.len;
 	mem->diff = 0;
-	mem_assert_fresh_frame_invariants(mem);
+	mem->framealloc->cursor = mem->framealloc->chunktop;
+	mem->nfreeobj = mem->framefreeobj;
+}
+
+CFUNC void m3_mem_write(m3_Mem *mem, BlockMask mask)
+{
+	// maintain invariants:
+	// (a) child.diff ⊂ parent.save
+	// (b) child.save ⊂ parent.save
+	// i.e. propagate mask to all parents
+	mem->unsaved &= ~mask;
+	size_t frame = mem->parent;
+	for (;;) {
+		m3_Frame *f = &mem->ftab[frame];
+		if ((mask & f->save) == mask)
+			break;
+		mem_copyblocks(mem->fsave + frame*mem->sizework, mem->work, mask & ~f->save, mem->sizework);
+		f->save |= mask;
+		frame = f->parent;
+	}
 }
 
 CFUNC int m3_mem_newobjref(m3_Mem *mem)
 {
-	ObjId oref = mem->lrefmax++;
-	*mem_vec_allocT(&mem->lfree, ObjId) = oref;
+	ObjId oref = mem->objh++;
+	if (UNLIKELY(mem->framefreeobj == mem->sizefreeobj))
+		m3_mem_growvec(mem->freeobj, mem->sizefreeobj, 0);
+	mem->freeobj[mem->framefreeobj++] = oref;
 	return oref;
 }
 
+// note: this function assumes mem is already zero-initialized (by ffi.new)
 CFUNC void m3_mem_init(m3_Mem *mem)
 {
 	// objref zero is always nil
-	mem->lrefmax = 1;
+	mem->objh = 1;
 	// frame zero always contains a valid pseudo-savepoint to avoid special cases in save/load
-	mem_ftab_grow(mem);
+	mem_grow_ftab(mem);
 	m3_Frame *frame = &mem->ftab[0];
-	frame->state = FRAME_ALIVE;
+	frame->state = FRAME_ACTIVE | FRAME_ALIVE;
 	frame->diff = ~0ULL;
 	mem->unsaved = ~0ULL;
-	mem_assert_fresh_frame_invariants(mem);
+	mem->framealloc = mem_alloc_new(mem);
 }
 
 CFUNC void m3_mem_destroy(m3_Mem *mem)
 {
+	if (!mem->ftab)
+		return; // m3_mem_init was never called
 	m3_Frame *ftab = mem->ftab;
-	for (size_t fp=1; fp<mem->maxframe; fp++) {
-		void *chunk = ftab[fp].chunk;
-		if (chunk)
-			mem_chunk_unmap_chain(chunk + ftab[fp].chunktop);
-	}
-	if (mem->chunk)
-		mem_chunk_unmap_chain(mem->chunk + mem->chunktop);
+	for (size_t fp=0; fp<mem->sizeftab; fp++)
+		mem_alloc_destroy(ftab[fp].alloc);
+	mem_alloc_destroy(mem->framealloc);
+	mem_alloc_destroy(&mem->alloc);
 	free(mem->ftab);
-	free(mem->fblock);
-	free(mem->fobj);
-	free(mem->fwork0);
-	free(mem->scratch.data);
-	free(mem->lfree.data);
+	free(mem->fsave_base);
+	free(mem->freeobj);
+	free(mem->tmp);
 }

@@ -1,5 +1,6 @@
 local ffi = require "ffi"
 local buffer = require "string.buffer"
+local C = require "m3_C"
 
 local colorterm = (function()
 	local term = os.getenv("TERM")
@@ -247,36 +248,58 @@ end
 
 local FRAME_MASKCHAR = { [0]="-", [1]="d", [2]="s", [3]="*" }
 
-local function trace_saveload(what, fp)
-	local state = require("m3_mem").state
+local function trace_savepoint(what, fp)
+	local state = require("m3_mem").state()
+	local nblock = math.min(64, state.sizework/C.CONFIG_BLOCKSIZE)
+	local frame = state.ftab[fp]
 	local buf = buffer.new()
 	buf:putf("%s  [%d:", what, fp)
-	for i=0, state.wnum-1 do
-		local d = tonumber(bit.band(bit.rshift(state.ftab[fp].diff, i), 1))
-		local s = tonumber(bit.band(bit.rshift(state.ftab[fp].save, i), 1))
+	for i=0, nblock-1 do
+		local d = tonumber(bit.band(bit.rshift(frame.diff, i), 1))
+		local s = tonumber(bit.band(bit.rshift(frame.save, i), 1))
 		buf:put(FRAME_MASKCHAR[d+2*s])
 	end
 	buf:put("]")
 	local fp1 = fp
 	while true do
-		fp1 = state.ftab[fp1].prev
+		fp1 = state.ftab[fp1].parent
 		if fp1 == 0 then break end
 		buf:putf("<-%d", fp1)
 	end
-	local top = state.ftab[fp].chunktop
+	local top = frame.alloc.chunktop
 	if top > 0 then
 		-- 16 = sizeof(ChunkMetadata), this rounds it back to a round multiple of page size
-		buf:putf(" (%s @ 0x%x)", prettysize(top+16), ffi.cast("intptr_t", state.ftab[fp].chunk))
+		buf:putf(" (%s @ 0x%x)", prettysize(top+16), ffi.cast("intptr_t", frame.alloc.chunk))
+	end
+	if bit.band(frame.state, 1) == 0 then
+		buf:put(" (inactive)")
+	end
+	if bit.band(frame.state, 2) == 0 then
+		buf:put(" (dead)")
+	end
+	if frame.state >= 4 then
+		buf:putf(" (%d children)", bit.rshift(frame.state, 2))
+	end
+	if frame.nobj > 0 then
+		buf:putf(" (objects: [", frame.nobj)
+		for i=0, frame.nobj-1 do
+			buf:putf(" %d", frame.objref[i])
+		end
+		buf:put(" ])")
 	end
 	trace(tostring(buf))
 end
 
 local function trace_save(fp)
-	trace_saveload("SAVE", fp)
+	trace_savepoint("SAVE  ", fp)
 end
 
 local function trace_load(fp)
-	trace_saveload("LOAD", fp)
+	trace_savepoint("LOAD  ", fp)
+end
+
+local function trace_delete(fp)
+	trace_savepoint("DELETE", fp)
 end
 
 local function mask2str(mask)
@@ -290,39 +313,41 @@ local function mask2str(mask)
 end
 
 local function trace_mask(mask)
-	trace(string.format("MASK  {%s}", mask2str(mask)))
+	trace(string.format("MASK    {%s}", mask2str(mask)))
 end
 
 local function trace_sql(stmt, ...)
-	trace(string.format("SQL   %s %s", stmt:sql(), vpretty("s", "\t", ...)))
+	trace(string.format("SQL     %s %s", stmt:sql(), vpretty("s", "\t", ...)))
 end
 
 local function trace_code(code, name)
-	trace(string.format("CODE  %.60s\n%s", name, code))
+	trace(string.format("CODE    %.60s\n%s", name, code))
 end
 
-local function trace_alloc(size)
-	local state = require("m3_mem").state
-	trace(string.format("ALLOC %s/%s (+%s)",
-		prettysize(state.chunktop-state.cursor),
-		state.chunktop > 0 and prettysize(state.chunktop+16) or "0",
-		prettysize(size)
+local function trace_alloc(alloc, size, _, ptr)
+	alloc = ffi.cast("m3_Alloc *", alloc)
+	trace(string.format("ALLOC   %s/%s (+%s): 0x%x",
+		prettysize(alloc.chunktop-alloc.cursor),
+		alloc.chunktop > 0 and prettysize(alloc.chunktop+16) or "0",
+		prettysize(size),
+		ffi.cast("uintptr_t", ptr)
 	))
 end
 
 local function trace_gmap(def)
-	trace(string.format("GMAP  %s", def))
+	trace(string.format("GMAP    %s", def))
 end
 
 local trace_events = {
-	data  = { mask="d", func=trace_data },
-	save  = { mask="s", func=trace_save },
-	load  = { mask="s", func=trace_load },
-	mask  = { mask="s", func=trace_mask },
-	sql   = { mask="q", func=trace_sql  },
-	code  = { mask="c", func=trace_code },
-	alloc = { mask="a", func=trace_alloc },
-	gmap  = { mask="g", func=trace_gmap }
+	data   = { mask="d", func=trace_data },
+	save   = { mask="s", func=trace_save },
+	load   = { mask="s", func=trace_load },
+	delete = { mask="s", func=trace_delete },
+	mask   = { mask="s", func=trace_mask },
+	sql    = { mask="q", func=trace_sql  },
+	code   = { mask="c", func=trace_code },
+	alloc  = { mask="a", func=trace_alloc },
+	gmap   = { mask="g", func=trace_gmap }
 }
 
 local TRACE_ALL = "dsq"

@@ -7,7 +7,7 @@ local ffi = require "ffi"
 local buffer = require "string.buffer"
 require "table.new"
 local load = code.load
-local mem_alloc, mem_realloc, mem_state, iswritable = mem.alloc, mem.realloc, mem.state, mem.iswritable
+local mem_alloc, mem_realloc, mem_state, iswritable = mem.alloc, mem.realloc, mem.state(), mem.iswritable
 local tonumber, type = tonumber, type
 local alignof, cast, ffi_copy, ffi_fill, sizeof, typeof = ffi.alignof, ffi.cast, ffi.copy, ffi.fill, ffi.sizeof, ffi.typeof
 local band, bor, lshift, rshift = bit.band, bit.bor, bit.lshift, bit.rshift
@@ -181,7 +181,7 @@ local function df_clear(df, idx)
 	elseif #idx > 0 then
 		local size = 8*(1+rshift(df.num,6))
 		-- scratch pointer is aligned here because len=0
-		local deletemap = cast(uint64_p, C.m3_mem_vec_alloc(mem_state.scratch, size))
+		local deletemap = cast(uint64_p, C.m3_mem_tmp(mem_state, size))
 		ffi_fill(deletemap, size)
 		for i=1, #idx do
 			local j = idx[i]
@@ -215,7 +215,7 @@ local function df_clearmask(df, mask)
 			i = i+1
 			remain = remain+1
 		end
-		local span = cast(span_p, C.m3_mem_vec_alloc(mem_state.scratch, sizeof_span))
+		local span = cast(span_p, C.m3_mem_tmp(mem_state, sizeof_span))
 		span.ofs = i0
 		span.num = i-i0
 	end

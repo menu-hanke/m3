@@ -64,11 +64,12 @@ local function copy(dst, src, num)
 			return copy_fallback(dst, src, 1, 0, num)
 		end
 	else
+		local j = src[0] == nil and 1 or 0
 		if type(dst) == "cdata" then
 			dst = direct(dst)
-			return copy_fallback(dst, src, 0, 1, num)
+			return copy_fallback(dst, src, 0, j, num)
 		else
-			return copy_fallback(dst, src, 1, 1, num)
+			return copy_fallback(dst, src, 1, j, num)
 		end
 	end
 end
@@ -234,7 +235,7 @@ end
 
 local function df_overwrite(df, col, src)
 	df_write(df, col)
-	copy(df[col], src)
+	copy(df[col], src, df.num)
 	return df
 end
 

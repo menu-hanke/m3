@@ -2,7 +2,7 @@
 
 local ct = require "controltest"
 
-control.simulate = control.first(control.any {
+control.simulate = control.single(control.any {
 	ct.node(1),
 	ct.node(2)
 })

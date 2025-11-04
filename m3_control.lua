@@ -28,7 +28,7 @@ end
 local all_mt = newmeta "all"
 local any_mt = newmeta "any"
 local call_mt = newmeta "call"
-local first_mt = newmeta "first"
+local single_mt = newmeta "single"
 local loop_mt = newmeta "loop"
 local callcc_mt = newmeta "callcc"
 local dynamic_mt = newmeta "dynamic"
@@ -82,16 +82,12 @@ local function call(f, ...)
 	return setmetatable({f=f, n=select("#", ...), ...}, call_mt)
 end
 
-local function first(node)
-	return setmetatable({node=node}, first_mt)
+local function single(node)
+	return setmetatable({node=node}, single_mt)
 end
 
 local function loop(node)
 	return setmetatable({node=tocontrol(node)}, loop_mt)
-end
-
-local function try(node)
-	return first(optional(node))
 end
 
 local function callcc(f)
@@ -119,7 +115,7 @@ local function describe(node)
 		buf:put("}")
 	elseif tag == "call" or tag == "callcc" or tag == "dynamic" then
 		buf:putf("%s", debug_describe(node.f))
-	elseif tag == "first" then
+	elseif tag == "single" then
 		buf:put(describe(node.node))
 	end
 	local desc = tostring(buf)
@@ -148,7 +144,7 @@ end
 -- TODO: all { any {x, a}, any {x, b} } -> all { x, any {a, b} }
 -- TODO: any { all {x, a}, all {x, b} } -> all { x, any {a, b} }
 -- TODO: any { x, x } -> x     (should this be allowed? this changes observable behavior)
--- TODO: first(first(x)) -> first(x)
+-- TODO: single(single(x)) -> single(x)
 optvisit = function(node)
 	local tag = gettag(node)
 	if tag == "all" then
@@ -403,34 +399,34 @@ function emit_node.any(node)
 		copycont, mem_save, mem_load, mem_delete, unpack(branches))
 end
 
--- first -------------------------------
+-- single ------------------------------
 
-local function first_aux(stack, base, top)
+local function single_aux(stack, base, top)
 	local r = stack[top]
-	if r.first then
-		r.first = false
+	if r.single then
+		r.single = false
 		return ctrl_continue(stack, base, top-1)
 	else
-		return "first.skip"
+		return "single.skip"
 	end
 end
 
-local function ctrl_first(stack, base, top, chain)
+local function ctrl_single(stack, base, top, chain)
 	-- TODO: come up with a better solution that doesn't require allocation
 	-- (editing the stack directly doesn't work because it's copied when branching)
-	stack[top+1] = { first=true }
-	stack[top+2] = first_aux
+	stack[top+1] = { single=true }
+	stack[top+2] = single_aux
 	local r = chain(stack, base, top+2)
-	if r ~= "first.skip" then return r end
+	if r ~= "single.skip" then return r end
 end
 
-function emit_node.first(node)
+function emit_node.single(node)
 	return load([[
-		local ctrl_first, chain = ...
+		local ctrl_single, chain = ...
 		return function(stack, base, top)
-			return ctrl_first(stack, base, top, chain)
+			return ctrl_single(stack, base, top, chain)
 		end
-	]], code.chunkname(describe(node)))(ctrl_first, emit(node.node))
+	]], code.chunkname(describe(node)))(ctrl_single, emit(node.node))
 end
 
 -- loop --------------------------------
@@ -535,9 +531,8 @@ return {
 	skip     = skip,
 	optional = optional,
 	call     = call,
-	first    = first,
+	single   = single,
 	loop     = loop,
-	try      = try,
 	callcc   = callcc,
 	dynamic  = dynamic,
 	exec     = exec

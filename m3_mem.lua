@@ -1,6 +1,6 @@
 local C = require "m3_C"
 local ffi = require "ffi"
-local band, bor = bit.band, bit.bor
+local band, bnot, bor = bit.band, bit.bnot, bit.bor
 local cast, copy = ffi.cast, ffi.copy
 local uintptr_t, voidptr = ffi.typeof("uintptr_t"), ffi.typeof("void *")
 local assert = assert
@@ -72,6 +72,23 @@ local function detach(fp)
 	end
 end
 
+local function lift(fp)
+	-- absorb the deleted savepoint's diff
+	mem.diff = bor(mem.diff, mem.ftab[fp].diff)
+	-- it's no longer active since we just left it.
+	-- it's also no longer alive because this function can only be called on dead savepoints.
+	-- it may have children, though.
+	mem.ftab[fp].state = band(mem.ftab[fp].state, bnot(FRAME_ALIVE_ACTIVE))
+	-- has its parent been deleted, too? (uncommon case)
+	local parent = mem.ftab[fp].parent
+	if band(mem.ftab[parent].state, FRAME_ALIVE) == 0 then
+		return lift(parent)
+	end
+	-- else: we have a new valid parent savepoint. update unsaved mask and parent pointer.
+	mem.unsaved = bnot(mem.ftab[parent].save)
+	mem.parent = parent
+end
+
 -- idiom:
 --   local fp = mem.save()
 --   ...
@@ -80,21 +97,14 @@ end
 --   mem.delete(fp)    <--    state = FRAME_ACTIVE|FRAME_ALIVE
 local function mem_delete(fp)
 	event("delete", fp)
-	local state = mem.ftab[fp].state
-	if state == FRAME_ALIVE_ACTIVE then
-		-- common case (idiom): delete savepoint without children (i.e. previous savepoint)
-		mem.ftab[fp].state = FRAME_ACTIVE
-		detach(fp)
-	elseif state == FRAME_ALIVE then
-		-- delete savepoint that is not entered and has no children
-		mem.ftab[fp].state = 0
-		detach(fp)
-	else
-		assert(band(state, FRAME_ALIVE) ~= 0, "attempt to delete savepoint twice")
-		-- delete savepoint that is not entered and has children.
-		-- don't detach it yet, it will be detached when all its children are detached.
-		mem.ftab[fp].state = state - FRAME_ALIVE
+	if fp == mem.parent then
+		-- maintain invariant: mem.parent is alive
+		lift(fp)
 	end
+	if mem.ftab[fp].state < FRAME_CHILD then
+		-- maintain invariant: children are either alive or have children (this node is now neither).
+		detach(fp)
+	end -- else: fp will be detached when its last child is deleted
 end
 
 local function mem_write(mask)

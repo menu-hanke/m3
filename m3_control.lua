@@ -389,7 +389,7 @@ function emit_node.any(node)
 			buf:put("mem_load(sp)\n")
 		end
 		if i == #node then
-			buf:putf("r = branch%d(stack, base, top)\n", i)
+			buf:putf("mem_delete(sp) do return branch%d(stack, base, top) end\n", i)
 		else
 			buf:putf("copycont(stack, base2, base, top+1-base) r = branch%d(stack, base2, top2) if r then goto out end\n", i)
 		end

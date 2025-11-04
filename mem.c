@@ -183,6 +183,11 @@ static void mem_grow_ftab(m3_Mem *mem)
 
 CFUNC int m3_mem_save(m3_Mem *mem)
 {
+	// it should never be possible to add a new child to a dead parent.
+	// mem_delete() assumes that once a frame is dead and its child counts goes to zero,
+	// it can be detached from the parent.
+	// saving on a dead frame would cause mem_delete() to detach the already detached frame again.
+	assert(mem->ftab[mem->parent].state & FRAME_ALIVE);
 	// find a free child frame id. invariant: child id > parent id
 	size_t id = mem->parent + 1;
 	mem->ftab[mem->parent].state += FRAME_CHILD;

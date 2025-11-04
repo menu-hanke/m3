@@ -31,6 +31,7 @@ local first_mt = newmeta "first"
 local call_mt = newmeta "call"
 local check_mt = newmeta "check"
 local single_mt = newmeta "single"
+local ifelse_mt = newmeta "ifelse"
 local loop_mt = newmeta "loop"
 local callcc_mt = newmeta "callcc"
 local dynamic_mt = newmeta "dynamic"
@@ -64,6 +65,13 @@ local function tocontrol(x, tab_mt)
 	end
 end
 
+local function tofunc(f)
+	if type(f) == "string" then
+		f = data.transaction():read(f)
+	end
+	return f
+end
+
 local function all(xs)
 	return tocontrol(xs, all_mt)
 end
@@ -88,10 +96,7 @@ local function try(node)
 end
 
 local function callcheck(mt, f, ...)
-	if type(f) == "string" then
-		f = data.transaction():read(f)
-	end
-	return setmetatable({f=f, n=select("#", ...), ...}, mt)
+	return setmetatable({f=tofunc(f), n=select("#", ...), ...}, mt)
 end
 
 local function call(...)
@@ -100,6 +105,10 @@ end
 
 local function check(...)
 	return callcheck(check_mt, ...)
+end
+
+local function ifelse(c, t, f)
+	return setmetatable({c=tofunc(c), t=tocontrol(t), f=tocontrol(f)}, ifelse_mt)
 end
 
 local function single(node)
@@ -165,6 +174,11 @@ local function isnop(node)
 	return gettag(node) == "all" and #node == 0
 end
 
+local function issame(a, b)
+	-- TODO: this should be a deep equality check
+	return a == b
+end
+
 local function concattab(a, b)
 	for _,c in ipairs(b) do
 		table.insert(a, c)
@@ -227,7 +241,23 @@ optvisit = function(node)
 		if #nodes == 1 then
 			node = nodes[1]
 		else
+			if #nodes == 2 and gettag(nodes[1]) == "all" and gettag(nodes[1][1]) == "check" then
+				-- optimize first(all { check, ...xs }, y)
+				--> ifelse(check, first(all { ...xs }, y), y)
+				local check = nodes[1][1]
+				local xs = {}
+				for i=2, #nodes[1] do xs[i-1] = nodes[1][i] end
+				return optimize(ifelse(check, first(all(xs), nodes[2]), nodes[2]))
+			end
 			node = setmetatable(nodes, first_mt)
+		end
+	elseif tag == "ifelse" then
+		local t = optimize(node.t)
+		local f = optimize(node.f)
+		if issame(t, f) then
+			node = t
+		else
+			node = ifelse(node.c, t, f)
 		end
 	end
 	return node
@@ -523,6 +553,20 @@ function emit_node.single(node)
 			return ctrl_single(stack, base, top, chain)
 		end
 	]], code.chunkname(describe(node)))(ctrl_single, emit(node.node))
+end
+
+-- ifelse ------------------------------
+
+function emit_node.ifelse(node)
+	local buf = buffer.new()
+	buf:put("local c, t, f, node = ...\n")
+	buf_argsload(buf, node.c)
+	buf_header(buf)
+	buf:put("return (c(")
+	buf_argscall(buf, node.c)
+	buf:put(") and t or f)(stack, base, top)\n")
+	buf_end(buf)
+	return load(buf, code.chunkname(describe(node)))(callfunc(node.c), emit(node.t), emit(node.f))
 end
 
 -- loop --------------------------------

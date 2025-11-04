@@ -27,6 +27,7 @@ end
 
 local all_mt = newmeta "all"
 local any_mt = newmeta "any"
+local first_mt = newmeta "first"
 local call_mt = newmeta "call"
 local single_mt = newmeta "single"
 local loop_mt = newmeta "loop"
@@ -71,11 +72,19 @@ local function any(xs)
 	return tocontrol(xs, any_mt)
 end
 
+local function first(xs)
+	return tocontrol(xs, first_mt)
+end
+
 local nothing = all {}
 local skip = any {}
 
 local function optional(node)
 	return any { node, nothing }
+end
+
+local function try(node)
+	return first { node, nothing }
 end
 
 local function call(f, ...)
@@ -106,7 +115,7 @@ local function describe(node)
 	local buf = buffer.new()
 	local tag = gettag(node)
 	buf:put(tag, " ")
-	if tag == "all" or tag == "any" then
+	if tag == "all" or tag == "any" or tag == "first" then
 		buf:put("{")
 		for i=1, #node do
 			if i>1 then buf:put(",") end
@@ -141,6 +150,16 @@ local function isskip(node)
 	return gettag(node) == "any" and #node == 0
 end
 
+local function isnop(node)
+	return gettag(node) == "all" and #node == 0
+end
+
+local function concattab(a, b)
+	for _,c in ipairs(b) do
+		table.insert(a, c)
+	end
+end
+
 -- TODO: all { any {x, a}, any {x, b} } -> all { x, any {a, b} }
 -- TODO: any { all {x, a}, all {x, b} } -> all { x, any {a, b} }
 -- TODO: any { x, x } -> x     (should this be allowed? this changes observable behavior)
@@ -152,9 +171,7 @@ optvisit = function(node)
 		for _,n in ipairs(node) do
 			n = optimize(n)
 			if gettag(n) == "all" then
-				for _,c in ipairs(n) do
-					table.insert(nodes, c)
-				end
+				concattab(nodes, n)
 			elseif isskip(n) then
 				return skip
 			else
@@ -171,9 +188,7 @@ optvisit = function(node)
 		for _,n in ipairs(node) do
 			n = optimize(n)
 			if gettag(n) == "any" then
-				for _,c in ipairs(n) do
-					table.insert(nodes, c)
-				end
+				concattab(nodes, n)
 			else
 				table.insert(nodes, n)
 			end
@@ -182,6 +197,26 @@ optvisit = function(node)
 			node = nodes[1]
 		else
 			node = setmetatable(nodes, any_mt)
+		end
+	elseif tag == "first" then
+		local nodes = {}
+		for _,n in ipairs(node) do
+			n = optimize(n)
+			if gettag(n) == "first" then
+				concattab(nodes, n)
+			elseif isskip(n) then
+				-- SKIP.
+			else
+				table.insert(nodes, n)
+				if isnop(n) then
+					break -- done. this is guaranteed to create a branch.
+				end
+			end
+		end
+		if #nodes == 1 then
+			node = nodes[1]
+		else
+			node = setmetatable(nodes, first_mt)
 		end
 	end
 	return node
@@ -399,6 +434,45 @@ function emit_node.any(node)
 		copycont, mem_save, mem_load, mem_delete, unpack(branches))
 end
 
+-- first -------------------------------
+
+local function first_aux(stack, base, top)
+	stack[stack[top]] = true
+	return ctrl_continue(stack, base, top-1)
+end
+
+function emit_node.first(node)
+	local buf = buffer.new()
+	buf:put("local copycont, mem_save, mem_load, mem_delete, first_aux")
+	local branches = {}
+	for i=1, #node do
+		buf:putf(", branch%d", i)
+		branches[i] = emit(node[i])
+	end
+	buf:put(" = ...\n")
+	buf_header(buf)
+	buf:put("stack[top+1] = false\n") -- top+1 = probe
+	buf:put("local top2, base2 = top+2+top-base, top+2\n")
+	buf:put("local r\n")
+	buf:put("local sp = mem_save()\n")
+	for i=1, #node do
+		if i>1 then
+			buf:put("mem_load(sp)\n")
+		end
+		if i == #node then
+			buf:putf("mem_delete(sp) do return branch%d(stack, base, top) end\n", i)
+		else
+			buf:put("copycont(stack, base2, base, top+1-base)\n")
+			buf:put("stack[top2+1] = top+1\n")
+			buf:put("stack[top2+2] = first_aux\n")
+			buf:putf("r = branch%d(stack, base2, top2+2) if r or stack[top+1] then goto out end\n", i)
+		end
+	end
+	buf:put("::out:: mem_delete(sp) return r end\n")
+	return load(buf, code.chunkname(describe(node)))(
+		copycont, mem_save, mem_load, mem_delete, first_aux, unpack(branches))
+end
+
 -- single ------------------------------
 
 local function single_aux(stack, base, top)
@@ -527,9 +601,11 @@ end
 return {
 	all      = all,
 	any      = any,
+	first    = first,
 	nothing  = nothing,
 	skip     = skip,
 	optional = optional,
+	try      = try,
 	call     = call,
 	single   = single,
 	loop     = loop,

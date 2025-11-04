@@ -13,6 +13,7 @@ _G.control = {
 	any            = control.any,
 	call           = control.call,
 	callcc         = control.callcc,
+	check          = control.check,
 	dynamic        = control.dynamic,
 	exec           = control.exec,
 	first          = control.first,

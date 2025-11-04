@@ -29,6 +29,7 @@ local all_mt = newmeta "all"
 local any_mt = newmeta "any"
 local first_mt = newmeta "first"
 local call_mt = newmeta "call"
+local check_mt = newmeta "check"
 local single_mt = newmeta "single"
 local loop_mt = newmeta "loop"
 local callcc_mt = newmeta "callcc"
@@ -40,8 +41,7 @@ local function tocontrol(x, tab_mt)
 	elseif type(x) == "function" then
 		return setmetatable({f=x}, call_mt)
 	elseif type(x) == "string" then
-		-- TODO: it's a query
-		error("TODO")
+		return setmetatable({f=data.transaction():read(x)}, check_mt)
 	elseif type(x) == "table" then
 		if istransaction(x) then
 			return setmetatable({f=x}, call_mt)
@@ -87,8 +87,19 @@ local function try(node)
 	return first { node, nothing }
 end
 
-local function call(f, ...)
-	return setmetatable({f=f, n=select("#", ...), ...}, call_mt)
+local function callcheck(mt, f, ...)
+	if type(f) == "string" then
+		f = data.transaction():read(f)
+	end
+	return setmetatable({f=f, n=select("#", ...), ...}, mt)
+end
+
+local function call(...)
+	return callcheck(call_mt, ...)
+end
+
+local function check(...)
+	return callcheck(check_mt, ...)
 end
 
 local function single(node)
@@ -122,7 +133,7 @@ local function describe(node)
 			buf:put(" ", describe(node[i]))
 		end
 		buf:put("}")
-	elseif tag == "call" or tag == "callcc" or tag == "dynamic" then
+	elseif tag == "call" or tag == "check" or tag == "callcc" or tag == "dynamic" then
 		buf:putf("%s", debug_describe(node.f))
 	elseif tag == "single" then
 		buf:put(describe(node.node))
@@ -318,7 +329,7 @@ local function buf_setcont(buf, cont)
 	buf:putf("rawset(stack,top,%s)\n", cont)
 end
 
--- call --------------------------------
+-- call & check ------------------------
 
 local function buf_argsload(buf, node)
 	for i=1, node.n or 0 do
@@ -346,7 +357,7 @@ local function callfunc(node)
 	end
 end
 
-function emit_node.call(node)
+local function emitcallcheck(node)
 	local buf = buffer.new()
 	buf:put("local rawget, f, node = rawget, ...\n")
 	buf_argsload(buf, node)
@@ -354,11 +365,18 @@ function emit_node.call(node)
 	buf:put("local r = f(")
 	buf_argscall(buf, node)
 	buf:put(")\n")
-	buf:put("if r ~= nil then return r end\n")
+	if gettag(node) == "call" then
+		buf:put("if r ~= nil then return r end\n")
+	else
+		buf:put("if r ~= true then return false end\n")
+	end
 	buf_continue(buf)
 	buf_end(buf)
 	return load(buf, code.chunkname(describe(node)))(callfunc(node), node)
 end
+
+emit_node.call = emitcallcheck
+emit_node.check = emitcallcheck
 
 -- all ---------------------------------
 
@@ -369,8 +387,12 @@ local function emit_chain_func(node, chain)
 	buf_header(buf)
 	buf:putf("local r = f(")
 	buf_argscall(buf, node)
-	buf:putf(")\n")
-	buf:put("if r ~= nil then return r end\n")
+	buf:put(")\n")
+	if gettag(node) == "call" then
+		buf:put("if r ~= nil then return r end\n")
+	else
+		buf:put("if r ~= true then return false end\n")
+	end
 	buf_tailcall(buf, "chain")
 	buf_end(buf)
 	return load(buf, code.chunkname(describe(node)))(callfunc(node), node, chain)
@@ -391,7 +413,7 @@ local function emit_chain(node, chain)
 	if not chain then
 		return emit(node)
 	end
-	if gettag(node) == "call" then
+	if gettag(node) == "call" or gettag(node) == "check" then
 		return emit_chain_func(node, chain)
 	else
 		return emit_chain_ctrl(node, chain)
@@ -607,6 +629,7 @@ return {
 	optional = optional,
 	try      = try,
 	call     = call,
+	check    = check,
 	single   = single,
 	loop     = loop,
 	callcc   = callcc,

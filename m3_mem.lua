@@ -3,7 +3,6 @@ local ffi = require "ffi"
 local band, bnot, bor = bit.band, bit.bnot, bit.bor
 local cast, copy = ffi.cast, ffi.copy
 local uintptr_t, voidptr = ffi.typeof("uintptr_t"), ffi.typeof("void *")
-local assert = assert
 local event = require("m3_debug").event
 
 local CONFIG_BLOCKSIZE = C.CONFIG_BLOCKSIZE
@@ -15,10 +14,9 @@ local block_ct = ffi.typeof(string.format([[
 	struct { uint8_t _[%d]; }
 ]], TARGET_CACHELINE_SIZE, CONFIG_BLOCKSIZE))
 
-local FRAME_ACTIVE = 1
+-- local FRAME_ACTIVE = 1
 local FRAME_ALIVE  = 2
 local FRAME_CHILD  = 4
-local FRAME_ALIVE_ACTIVE = FRAME_ALIVE + FRAME_ACTIVE
 
 local mem = ffi.gc(ffi.new("m3_Mem"), C.m3_mem_destroy)
 
@@ -61,32 +59,36 @@ local function mem_load(fp)
 	C.m3_mem_load(mem, fp)
 end
 
+local function isfresh(alloc)
+	return alloc.cursor == alloc.chunktop and alloc.needsweep == 0
+end
+
 local function detach(fp)
 	local parent = mem.ftab[fp].parent
 	local state = mem.ftab[parent].state - FRAME_CHILD
 	mem.ftab[parent].state = state
-	if state <= FRAME_ACTIVE then
+	if state == 0 then
 		-- use a tail call here rather than a loop because this has a very low and static iteration
 		-- count so we don't want the jit compiler to compile a looping trace
 		return detach(parent)
 	end
 end
 
-local function lift(fp)
-	-- absorb the deleted savepoint's diff
+local function reclaim(fp)
+	-- mark it as reusable:
+	-- * it already has no children
+	-- * it's not active because we're leaving it
+	-- * it's not alive because we're killing it
+	mem.ftab[fp].state = 0
+	-- absorb diff and parent save mask into pending frame
 	mem.diff = bor(mem.diff, mem.ftab[fp].diff)
-	-- it's no longer active since we just left it.
-	-- it's also no longer alive because this function can only be called on dead savepoints.
-	-- it may have children, though.
-	mem.ftab[fp].state = band(mem.ftab[fp].state, bnot(FRAME_ALIVE_ACTIVE))
-	-- has its parent been deleted, too? (uncommon case)
 	local parent = mem.ftab[fp].parent
-	if band(mem.ftab[parent].state, FRAME_ALIVE) == 0 then
-		return lift(parent)
-	end
-	-- else: we have a new valid parent savepoint. update unsaved mask and parent pointer.
 	mem.unsaved = bnot(mem.ftab[parent].save)
+	-- step up in the frame tree.
+	-- fp is now reusable in the next save() call.
 	mem.parent = parent
+	-- update parent's child count because we just deleted one
+	detach(fp)
 end
 
 -- idiom:
@@ -97,14 +99,33 @@ end
 --   mem.delete(fp)    <--    state = FRAME_ACTIVE|FRAME_ALIVE
 local function mem_delete(fp)
 	event("delete", fp)
-	if fp == mem.parent then
-		-- maintain invariant: mem.parent is alive
-		lift(fp)
+	local state = mem.ftab[fp].state
+	if fp == mem.parent and state < FRAME_CHILD then
+		-- if the parent frame has no children, and either
+		-- (1) the pending frame has not allocated; or
+		-- (1) the parent frame has not allocated
+		-- then we can immediately reclaim the parent frame for reuse.
+		if isfresh(mem.framealloc) then
+			-- case (1): the pending frame has not allocated, and therefore nothing in the pending
+			-- frame references the frame allocator. we may reclaim the parent frame after
+			-- swapping the allocators.
+			mem.ftab[fp].alloc, mem.framealloc = mem.framealloc, mem.ftab[fp].alloc
+			reclaim(fp)
+			return
+		end
+		if isfresh(mem.ftab[fp].alloc) then
+			-- case (2): parent frame has not allocated, and therefore nothing in the pending frame
+			-- references the parent frame, and it's safe to reclaim the frame pointer.
+			reclaim(fp)
+			return
+		end
 	end
-	if mem.ftab[fp].state < FRAME_CHILD then
-		-- maintain invariant: children are either alive or have children (this node is now neither).
+	-- general case: mark the frame as deleted, and if it became reusable, update its parent.
+	state = band(state, bnot(FRAME_ALIVE))
+	mem.ftab[fp].state = state
+	if state == 0 then
 		detach(fp)
-	end -- else: fp will be detached when its last child is deleted
+	end
 end
 
 local function mem_write(mask)

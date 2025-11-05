@@ -124,6 +124,7 @@ void *m3_mem_tmp(m3_Mem *mem, size_t size)
 
 static void mem_alloc_sweep(m3_Alloc *alloc)
 {
+	alloc->needsweep = 0;
 	if (!alloc->chunk)
 		return;
 	ChunkMetadata *meta = alloc->chunk + alloc->chunktop;
@@ -183,11 +184,6 @@ static void mem_grow_ftab(m3_Mem *mem)
 
 CFUNC int m3_mem_save(m3_Mem *mem)
 {
-	// it should never be possible to add a new child to a dead parent.
-	// mem_delete() assumes that once a frame is dead and its child counts goes to zero,
-	// it can be detached from the parent.
-	// saving on a dead frame would cause mem_delete() to detach the already detached frame again.
-	assert(mem->ftab[mem->parent].state & FRAME_ALIVE);
 	// find a free child frame id. invariant: child id > parent id
 	size_t id = mem->parent + 1;
 	mem->ftab[mem->parent].state += FRAME_CHILD;
@@ -270,13 +266,16 @@ static void mem_load_walk(m3_Mem *mem, FrameId fp)
 		if (frame > fp) {
 			// walk up from source frame
 			m3_Frame *f = &ftab[frame];
+			FrameId parent = f->parent;
+			assert(ftab[parent].state >= FRAME_CHILD);
 			assert(f->state & FRAME_ACTIVE);
 			f->state &= ~FRAME_ACTIVE;
 			BlockMask diff = f->diff;
 			restore |= diff;
-			// did we walk past a frame we may later return to?
-			if (UNLIKELY(f->state)) {
-				// then ensure it saves its own diff.
+			if (LIKELY(!f->state)) {
+				ftab[parent].state -= FRAME_CHILD;
+			} else {
+				// we might later return to this frame, so ensure it saves its own diff.
 				// no propagation needed here because the invariant child.diff ⊂ parent.save
 				// guarantees that what we save here is already saved in the parent
 				assert((diff & ftab[f->parent].save) == diff);
@@ -286,7 +285,7 @@ static void mem_load_walk(m3_Mem *mem, FrameId fp)
 					mem_copyblocks(fsave + frame*sizework, work, need, sizework);
 				}
 			}
-			frame = f->parent;
+			frame = parent;
 		} else if (UNLIKELY(fp > frame)) {
 			// walk up from target frame (slow path: target is not an ancestor of source)
 			if (UNLIKELY(curtmp+sizeof(FrameId) >= mem->sizetmp))
